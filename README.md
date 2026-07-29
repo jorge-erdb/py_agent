@@ -39,19 +39,51 @@ pip install -r requirements.txt
 
 ## Configuration
 
-All settings use sensible defaults — override them with environment variables, or copy
-`.env.example` to `.env` and edit it:
+Settings resolve in three layers — **environment variable**, then **user config
+file**, then **built-in default**. Everything is optional.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LLM_BASE_URL` | `http://localhost:8080/v1` | OpenAI-compatible API URL |
-| `LLM_API_KEY` | `sk-no-key-needed` | API key for the LLM server |
-| `LLM_MODEL` | `local-model` | Model name sent to the LLM |
-| `LLM_TIMEOUT` | `600` | Request timeout in **seconds** (default 10 min) |
-| `AGENT_NAME` | `Kairo` | Agent name used in system prompt |
-| `AGENT_PERSONA` | _(default persona)_ | System prompt description |
-| `SERVER_HOST` | `0.0.0.0` | Host to bind the server |
-| `SERVER_PORT` | `8000` | Port to bind the server |
+The config file lives outside the repository at
+`~/.config/py_agent/config.json` (or `$XDG_CONFIG_HOME/py_agent/config.json`), so
+API keys never touch git and local tweaks never show up in `git status`:
+
+```bash
+mkdir -p ~/.config/py_agent
+cp config.example.json ~/.config/py_agent/config.json
+chmod 600 ~/.config/py_agent/config.json   # if it will hold a real API key
+```
+
+A malformed or unreadable config file is logged and ignored rather than fatal.
+
+### Using a cloud provider
+
+The client is the OpenAI SDK, so any OpenAI-compatible endpoint works — just set
+`base_url`, `model`, and `api_key`:
+
+```json
+{
+  "llm": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "anthropic/claude-sonnet-4",
+    "api_key": "sk-or-..."
+  }
+}
+```
+
+`config.example.json` includes ready-made blocks for llama.cpp, Ollama, OpenAI,
+OpenRouter, Groq, and Together.
+
+### Settings
+
+| Environment variable | Config file key | Default | Description |
+|----------------------|-----------------|---------|-------------|
+| `LLM_BASE_URL` | `llm.base_url` | `http://localhost:8080/v1` | OpenAI-compatible API URL |
+| `LLM_API_KEY` | `llm.api_key` | `sk-no-key-needed` | API key for the LLM server |
+| `LLM_MODEL` | `llm.model` | `local-model` | Model name sent to the LLM |
+| `LLM_TIMEOUT` | `llm.timeout` | `600` | Request timeout in **seconds** (10 min) |
+| `AGENT_NAME` | `agent.name` | `Kairo` | Agent name used in system prompt |
+| `AGENT_PERSONA` | `agent.persona` | _(default persona)_ | System prompt description |
+| `SERVER_HOST` | `server.host` | `0.0.0.0` | Host to bind the server |
+| `SERVER_PORT` | `server.port` | `8000` | Port to bind the server |
 
 ## Running
 
@@ -61,13 +93,12 @@ python main.py
 
 The server starts on the configured host and port (default `http://0.0.0.0:8000`). Visit `http://localhost:8000` in your browser to access both the chat UI and the API endpoints. The frontend and backend are served from a single process.
 
-> **Note:** the default `SERVER_HOST` of `0.0.0.0` binds to every network interface, exposing the agent — and its shell tool — to anyone on your network. Set `SERVER_HOST=127.0.0.1` unless you specifically want remote access. See [Security](#security).
+> **Note:** the default `SERVER_HOST` of `0.0.0.0` binds every network interface, exposing the agent — and its shell tool — to anyone who can reach the port, with no authentication. The server logs a warning when this is in effect. Set `SERVER_HOST=127.0.0.1` unless you specifically want remote access. See [SECURITY.md](SECURITY.md).
 
-## Running with Docker (recommended)
+## Running with Docker
 
-Because the agent executes shell commands, running it in a container is the
-recommended setup — it turns the whitelist from an advisory guardrail into an
-enforced boundary.
+Optional. Running natively works fine — the container mainly buys you a sandbox,
+which matters because the agent executes shell commands.
 
 ```bash
 docker compose up -d --build
@@ -101,8 +132,10 @@ prompt-injected model could read back to whoever is chatting with it.
 ```
 py_agent/
 ├── main.py                  # Entry point — launches uvicorn + serves frontend
+├── config.py                # Layered config: env > user file > default
+├── config.example.json      # Template for ~/.config/py_agent/config.json
 ├── requirements.txt         # Pinned Python dependencies
-├── .env.example             # Configuration template
+├── SECURITY.md              # Trust model and boundaries
 ├── Dockerfile               # Container image
 ├── docker-compose.yml       # Sandboxed run configuration
 ├── venv/                    # Virtual environment (not committed)
@@ -184,39 +217,20 @@ Clear chat history for a specific session, or destroy all sessions if no `sessio
 ## Security
 
 This project lets a language model run shell commands on the machine hosting it.
-Understand the following before exposing it to anything:
+**[SECURITY.md](SECURITY.md) is the authoritative document** — read it before
+exposing the agent to anything you care about. In brief:
 
-**What protects you.** `agent/tools.py` gates every command through two checks:
+- `agent/tools.py` gates commands through a whitelist and blacklist. This is a
+  guardrail against model error, **not a security boundary** — commands run through
+  a full shell, and whitelisted interpreters like `python3` can do anything.
+- There is **no sandbox**, no timeout, and no resource limit. Containing the agent
+  is your decision; the [Docker setup](#running-with-docker) is one reasonable way.
+- There is **no authentication** on any endpoint, and CORS is `*`.
+- Prompt injection is possible and cannot be prevented. Don't point the agent at
+  content you don't trust.
 
-- A **whitelist** of allowed command names (`cat`, `ls`, `grep`, `find`, `python3`,
-  `sqlite3`, and similar read-oriented tools). Only the first token is checked.
-- A **blacklist** of patterns matched against the full command string, rejecting
-  `rm`, `sudo`, `dd if=`, and `git`.
-
-Output is truncated at 6,000 characters.
-
-**What does not protect you.** These checks are a guardrail against an LLM making a
-careless mistake — not a security boundary against a determined attacker:
-
-- Commands run through a **full shell**, so pipes, redirection, `;`, and `$(...)`
-  are all live. A whitelisted command name is no guarantee the rest of the line is
-  harmless.
-- Whitelisted interpreters (`python3`, `sqlite3`) can do essentially anything.
-- There is **no sandboxing, no timeout, and no resource limit**. Commands run as the
-  user who started the server, with that user's full filesystem access.
-- `/chat` and `/chat/stream` have **no authentication**, and CORS is set to `*`.
-
-**Recommendations.**
-
-- **Use the [Docker setup](#running-with-docker-recommended).** It enforces most of
-  what the whitelist only suggests: immutable root filesystem, non-root user, no
-  capabilities, loopback-only port, and read-only host mounts.
-- If running natively, bind to `127.0.0.1` (`SERVER_HOST=127.0.0.1`) rather than the
-  `0.0.0.0` default.
-- Never expose this to the public internet or an untrusted network.
-- Treat the filesystem the agent can reach as compromised-by-design, and mount only
-  what it genuinely needs.
-- Tighten `COMMAND_WHITELIST` in `agent/tools.py` to the minimum your use case needs.
+Practical minimum: set `SERVER_HOST=127.0.0.1`, and never expose this to the public
+internet.
 
 ## Extending the Agent
 

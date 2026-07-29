@@ -1,0 +1,30 @@
+{
+  "_comment": "Copy to ~/.config/py_agent/config.json and edit. Every key is optional; anything omitted falls back to the built-in default. Environment variables override this file. If you put a real API key here, run: chmod 600 ~/.config/py_agent/config.json",
+
+  "llm": {
+    "base_url": "http://localhost:8080/v1",
+    "api_key": "sk-no-key-needed",
+    "model": "local-model",
+    "timeout": 600
+  },
+
+  "agent": {
+    "name": "Kairo",
+    "persona": "You are an advanced AI assistant designed to be genuinely helpful and rigorously honest. Your core purpose is to assist users in achieving their goals."
+  },
+
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000
+  },
+
+  "_examples": {
+    "llama.cpp (native)":    { "base_url": "http://localhost:8080/v1", "model": "local-model" },
+    "llama.cpp (in docker)": { "base_url": "http://host.docker.internal:8080/v1", "model": "local-model" },
+    "Ollama":                { "base_url": "http://localhost:11434/v1", "model": "llama3.1" },
+    "OpenAI":                { "base_url": "https://api.openai.com/v1", "model": "gpt-4o", "api_key": "sk-..." },
+    "OpenRouter":            { "base_url": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-4", "api_key": "sk-or-..." },
+    "Groq":                  { "base_url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile", "api_key": "gsk_..." },
+    "Together":              { "base_url": "https://api.together.xyz/v1", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "api_key": "..." }
+  }
+}

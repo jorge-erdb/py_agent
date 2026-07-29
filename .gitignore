@@ -36,3 +36,6 @@ scripts/update.sh
 
 # Unused 4MB fallback image (CSS loads the .avif)
 frontend/assets/background.jpg
+
+# Local config — real API keys belong in ~/.config/py_agent/config.json, never here
+config.json

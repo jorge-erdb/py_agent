@@ -3,13 +3,13 @@ import asyncio
 import time
 import json
 import logging
-import os
 from typing import Optional, AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Literal
+import config
 from agent.core import Agent, Tool
 from agent.tools import run_shell_command
 from database.db import DatabaseManager
@@ -29,16 +29,16 @@ app.add_middleware(
 )
 
 
-# Read configuration from environment
-AGENT_NAME = os.getenv("AGENT_NAME", "Kairo")
-AGENT_PERSONA = os.getenv(
-    "AGENT_PERSONA",
+# Configuration: environment > ~/.config/py_agent/config.json > default
+AGENT_NAME = config.get("agent", "name", "AGENT_NAME", "Kairo")
+AGENT_PERSONA = config.get(
+    "agent", "persona", "AGENT_PERSONA",
     "You are an advanced AI assistant designed to be genuinely helpful and rigorously honest. Your core purpose is to assist users in achieving their goals."
 )
-LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8080/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY", "sk-no-key-needed")
-LLM_MODEL = os.getenv("LLM_MODEL", "local-model")
-LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "600"))
+LLM_BASE_URL = config.get("llm", "base_url", "LLM_BASE_URL", "http://localhost:8080/v1")
+LLM_API_KEY = config.get("llm", "api_key", "LLM_API_KEY", "sk-no-key-needed")
+LLM_MODEL = config.get("llm", "model", "LLM_MODEL", "local-model")
+LLM_TIMEOUT = config.get("llm", "timeout", "LLM_TIMEOUT", 600, cast=int)
 
 
 class SessionManager:
