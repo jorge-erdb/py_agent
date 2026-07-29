@@ -4,7 +4,7 @@ import time
 import json
 import logging
 from typing import Optional, AsyncGenerator
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -221,6 +221,7 @@ class ChatResponse(BaseModel):
 
 class ClearRequest(BaseModel):
     session_id: Optional[str] = None
+    all: bool = False
 
 
 @app.post("/chat/stream")
@@ -311,13 +312,18 @@ async def chat(request: ChatRequest):
 
 @app.post("/clear")
 async def clear_history(request: ClearRequest):
-    if request.session_id:
+    if request.all:
+        count = session_manager.destroy_all()
+        logger.info("Destroyed %d sessions (all=True)", count)
+        
+        return {"status": "all sessions destroyed", "cleared": True}
+
+    elif request.session_id:
         existed = session_manager.clear(request.session_id)
         if not existed:
             return {"status": "session not found", "cleared": False}
         return {"status": "history cleared", "cleared": True}
+
     else:
-        # Destroy all sessions (fallback for old clients without session_id)
-        count = session_manager.destroy_all()
-        logger.info("Destroyed %d sessions (no session_id provided)", count)
-        return {"status": "all sessions destroyed", "cleared": True}
+        raise HTTPException(status_code=400, detail="Either session_id or all=true must be provided.")
+        

@@ -60,6 +60,28 @@ the agent has both tool access and the ability to read untrusted input.
 Do not point the agent at content you do not trust, and do not assume the
 whitelist limits what injected instructions can accomplish.
 
+## Data Loss
+
+`POST /clear` with `{"all": true}` deletes every session and every message in the
+database. This is **irreversible and by design** — the endpoint exists so the
+operator can wipe everything deliberately.
+
+Understand what that means before calling it:
+
+- **There is no backup and no undo.** Nothing is dumped before the delete.
+- **Deleted rows are not recoverable from the database file.** SQLite is typically
+  built with `secure_delete` enabled, which zeroes freed pages instead of merely
+  unlinking them. Forensic carving of the file will return nothing.
+- Conversation history is the only copy. If you want it to survive, back up
+  `data/agent.db` yourself — `sqlite3 data/agent.db ".backup data/agent.db.bak"`.
+
+The endpoint requires the destructive scope to be stated explicitly (`all: true`);
+a request specifying neither a `session_id` nor `all` is rejected with HTTP 400 and
+deletes nothing. This exists because the endpoint is unauthenticated: anyone who
+can reach the port, and any script or client that POSTs to `/clear` to check
+whether the service is alive, can otherwise destroy the database. Treat `/clear`
+as destructive in any tooling that touches this API.
+
 ## Secrets
 
 - `~/.config/py_agent/config.json` may hold real API keys. Run
@@ -93,6 +115,10 @@ Reports that demonstrate a boundary crossing py_agent itself grants:
   config file, its database, or files in directories it has been pointed at.
 - Resource exhaustion or denial of service caused by operator-supplied config or
   by the model looping.
+- **Irreversible history deletion through `POST /clear` with `all: true`.** This is
+  intended behaviour, documented under [Data Loss](#data-loss). Note that the
+  endpoint is unauthenticated, so anyone who can reach the port can invoke it — that
+  is a consequence of the documented lack of authentication, not a separate issue.
 - Third-party API keys the operator supplied.
 
 ## Reporting

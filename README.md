@@ -195,23 +195,37 @@ Send a message and receive the agent's response.
 
 ### `POST /clear`
 
-Clear chat history for a specific session, or destroy all sessions if no `session_id` is provided.
+Deletes chat history. The destructive scope must be stated explicitly — a request
+that specifies neither target is rejected rather than assumed to mean "everything".
 
-**Request body:**
+**Clear one session** — removes that session's messages, keeps the session itself:
+
 ```json
-{
-  "session_id": "optional-session-id"
-}
+{ "session_id": "the-session-id" }
 ```
-
-**Response (with session_id):**
 ```json
 {"status": "history cleared", "cleared": true}
 ```
 
-**Response (without session_id):**
+An unknown `session_id` is a no-op: `{"status": "session not found", "cleared": false}`.
+
+**Destroy everything** — every session and every message in the database:
+
+```json
+{ "all": true }
+```
 ```json
 {"status": "all sessions destroyed", "cleared": true}
+```
+
+> ⚠️ `all: true` is **irreversible**. There is no backup and no undo — see
+> [SECURITY.md](SECURITY.md#data-loss). If both fields are supplied, `all` wins.
+
+**Neither field** — `{}`, `{"session_id": null}`, or `{"all": false}` — returns
+**HTTP 400** and deletes nothing:
+
+```json
+{"detail": "Either session_id or all=true must be provided."}
 ```
 
 ## Security
@@ -228,6 +242,8 @@ exposing the agent to anything you care about. In brief:
 - There is **no authentication** on any endpoint, and CORS is `*`.
 - Prompt injection is possible and cannot be prevented. Don't point the agent at
   content you don't trust.
+- `POST /clear` with `all: true` **irreversibly** deletes all history, and the
+  endpoint is unauthenticated. Back up `data/agent.db` if it matters to you.
 
 Practical minimum: set `SERVER_HOST=127.0.0.1`, and never expose this to the public
 internet.

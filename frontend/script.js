@@ -185,11 +185,17 @@ function stopRequest() {
 }
 
 async function clearHistory() {
+  if (!sessionId) {
+    logContainer.innerHTML = '';
+    appendLog('system', 'History cleared (local reset).');
+    return;
+  }
+
   try {
     await fetch('/clear', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ session_id: sessionId}),
     });
     logContainer.innerHTML = '';
     appendLog('system', 'History cleared.');
