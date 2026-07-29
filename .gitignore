@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Runtime data — keep the directory, ignore its contents
+data/*
+!data/.gitkeep
+
+# Local version snapshots (superseded by git)
+.v-control/
+
+# Personal system scripts (not part of this project)
+scripts/update.sh
+
+# Unused 4MB fallback image (CSS loads the .avif)
+frontend/assets/background.jpg

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Agent Console</title>
+<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-card">
+    <h3 class="app-title">Agent Console</h3>
+    <div id="status"><span id="spinner"></span> Processing…</div>
+    <div id="log-container"></div>
+    <div class="input-area">
+      <input type="text" id="user-input" placeholder="Enter command..." autofocus autocomplete="off">
+      <div class="button-group">
+        <button id="send-btn">Send</button>
+        <button id="stop-btn">Stop</button>
+        <button id="clear-btn">Clear</button>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
