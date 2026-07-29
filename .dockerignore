@@ -1,0 +1,14 @@
+.git/
+.gitignore
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.v-control/
+data/
+scripts/
+.env
+*.log
+README.md
+LICENSE
+frontend/assets/background.jpg

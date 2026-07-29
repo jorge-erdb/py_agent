@@ -63,6 +63,39 @@ The server starts on the configured host and port (default `http://0.0.0.0:8000`
 
 > **Note:** the default `SERVER_HOST` of `0.0.0.0` binds to every network interface, exposing the agent — and its shell tool — to anyone on your network. Set `SERVER_HOST=127.0.0.1` unless you specifically want remote access. See [Security](#security).
 
+## Running with Docker (recommended)
+
+Because the agent executes shell commands, running it in a container is the
+recommended setup — it turns the whitelist from an advisory guardrail into an
+enforced boundary.
+
+```bash
+docker compose up -d --build
+```
+
+Then visit `http://localhost:8000`.
+
+The container is locked down by default:
+
+| Control | Effect |
+|---------|--------|
+| `read_only: true` | Root filesystem is immutable — nothing the model runs can persist itself |
+| Non-root user (uid 10001) | No write access to `/app` or any host mount |
+| `cap_drop: ALL`, `no-new-privileges` | No capability escalation |
+| `127.0.0.1:8000:8000` | Reachable only from this machine, never the network |
+| `pids_limit`, `mem_limit` | Bounds runaway loops — the shell tool has no timeout of its own |
+| `agent-data` volume | The only writable mount; keeps SQLite sessions across restarts |
+
+**Reaching your LLM server.** Inside the container, `localhost` is the container
+itself. The compose file therefore points `LLM_BASE_URL` at
+`http://host.docker.internal:8080/v1` and defines a `host-gateway` alias so that
+resolves on Linux. If your LLM runs somewhere else, override `LLM_BASE_URL`.
+
+**Giving the agent host files.** By default it can read `~/Projects` at
+`/host/Projects`, read-only. Edit the `volumes:` block in `docker-compose.yml` to
+add or remove paths. Mount only what you need — every path you add is one a
+prompt-injected model could read back to whoever is chatting with it.
+
 ## Project Structure
 
 ```
@@ -70,6 +103,8 @@ py_agent/
 ├── main.py                  # Entry point — launches uvicorn + serves frontend
 ├── requirements.txt         # Pinned Python dependencies
 ├── .env.example             # Configuration template
+├── Dockerfile               # Container image
+├── docker-compose.yml       # Sandboxed run configuration
 ├── venv/                    # Virtual environment (not committed)
 │
 ├── agent/                   # Agent core logic
@@ -173,10 +208,14 @@ careless mistake — not a security boundary against a determined attacker:
 
 **Recommendations.**
 
-- Bind to `127.0.0.1` (`SERVER_HOST=127.0.0.1`) rather than the `0.0.0.0` default.
+- **Use the [Docker setup](#running-with-docker-recommended).** It enforces most of
+  what the whitelist only suggests: immutable root filesystem, non-root user, no
+  capabilities, loopback-only port, and read-only host mounts.
+- If running natively, bind to `127.0.0.1` (`SERVER_HOST=127.0.0.1`) rather than the
+  `0.0.0.0` default.
 - Never expose this to the public internet or an untrusted network.
-- Run it as an unprivileged user, ideally inside a container or VM, and treat the
-  filesystem it can reach as compromised-by-design.
+- Treat the filesystem the agent can reach as compromised-by-design, and mount only
+  what it genuinely needs.
 - Tighten `COMMAND_WHITELIST` in `agent/tools.py` to the minimum your use case needs.
 
 ## Extending the Agent

@@ -1,0 +1,60 @@
+services:
+  py-agent:
+    build: .
+    image: py-agent
+    container_name: py-agent
+
+    # Published on the host loopback only. Changing this to "8000:8000"
+    # exposes an unauthenticated shell-executing agent to your whole
+    # network — don't, unless you have put auth in front of it.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    environment:
+      # Your LLM server runs on the *host*. Inside the container "localhost"
+      # is the container itself, so it has to be reached via the gateway
+      # alias defined in extra_hosts below.
+      LLM_BASE_URL: http://host.docker.internal:8080/v1
+      LLM_API_KEY: sk-no-key-needed
+      LLM_MODEL: local-model
+      LLM_TIMEOUT: 600
+      AGENT_NAME: Kairo
+
+    # Makes host.docker.internal resolve on Linux (it is built in on
+    # Docker Desktop for macOS/Windows, but not on Linux engines).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # SQLite sessions. The only writable mount — without it, all
+      # conversation history is lost when the container is recreated.
+      - agent-data:/app/data
+
+      # --- Host filesystem, READ-ONLY ---------------------------------
+      # The agent can read these paths but never modify them. Add only
+      # what you actually want it to see; each entry widens what a
+      # prompt-injected model can exfiltrate through the chat window.
+      - ${HOME}/Projects:/host/Projects:ro
+      # - ${HOME}/Documents:/host/Documents:ro
+      # ----------------------------------------------------------------
+
+    # Container filesystem is immutable apart from the mounts above and
+    # the tmpfs below, so nothing the model runs can persist itself.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # Caps runaway loops. The shell tool has no timeout of its own, so
+    # without this a single bad command can eat the host's CPU.
+    pids_limit: 256
+    mem_limit: 1g
+
+    restart: unless-stopped
+
+volumes:
+  agent-data:
