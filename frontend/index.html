@@ -2,28 +2,146 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent Console</title>
-<link rel="stylesheet" href="style.css">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles/main.css">
+<script>
+  // Apply the saved theme before first paint, otherwise a saved light theme
+  // flashes dark on a dark-mode system while the modules load. settings.js owns
+  // this attribute afterwards — keep the key and values in sync with it.
+  try {
+    const saved = JSON.parse(localStorage.getItem('agent.settings'));
+    if (saved && (saved.theme === 'light' || saved.theme === 'dark')) {
+      document.documentElement.setAttribute('data-theme', saved.theme);
+    }
+  } catch {}
+</script>
 </head>
 <body>
-  <div class="app-card">
-    <h3 class="app-title">Agent Console</h3>
-    <div id="status"><span id="spinner"></span> Processing…</div>
-    <div id="log-container"></div>
-    <div class="input-area">
-      <input type="text" id="user-input" placeholder="Enter command..." autofocus autocomplete="off">
-      <div class="button-group">
-        <button id="send-btn">Send</button>
-        <button id="stop-btn">Stop</button>
-        <button id="clear-btn">Clear</button>
-      </div>
-    </div>
+
+<aside class="history" id="history" aria-label="Conversation history">
+  <div class="history-head">
+    <h2>Conversations</h2>
+    <button id="history-close" class="icon-btn" type="button" aria-label="Close history">×</button>
   </div>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <script src="script.js"></script>
+  <div class="history-list" id="history-list"></div>
+</aside>
+
+<div class="scrim" id="scrim" hidden></div>
+
+<div class="main">
+
+  <header class="topbar">
+    <div class="brand">
+      <button id="history-btn" class="icon-btn" type="button" aria-label="Toggle history">☰</button>
+      <span class="brand-dot" aria-hidden="true"></span>
+      <h1>Agent Console</h1>
+    </div>
+
+    <div class="status" id="status" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <span id="status-text">Working…</span>
+    </div>
+
+    <div class="topbar-actions">
+      <span id="conn" class="conn" data-state="unknown" title="Backend status">offline</span>
+      <button id="new-btn" class="btn btn-ghost" title="Start a fresh conversation">New</button>
+      <button id="clear-btn" class="btn btn-ghost" title="Clear this conversation's history">Clear</button>
+      <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" title="Settings">⚙</button>
+    </div>
+  </header>
+
+  <main class="log" id="log" aria-live="polite" aria-busy="false">
+    <div class="empty" id="empty">
+      <p class="empty-title">Ready.</p>
+      <p class="empty-sub">Type a command below to get started.</p>
+    </div>
+  </main>
+
+  <footer class="composer">
+    <form id="composer-form" class="composer-form" autocomplete="off">
+      <textarea
+        id="input"
+        class="input"
+        rows="1"
+        placeholder="Enter a command…  (Enter to send, Shift+Enter for newline)"
+        autofocus
+      ></textarea>
+      <div class="composer-buttons">
+        <button type="submit" id="send-btn" class="btn btn-primary">Send</button>
+        <button type="button" id="stop-btn" class="btn btn-danger" hidden>Stop</button>
+      </div>
+    </form>
+  </footer>
+
+</div>
+
+<dialog class="settings" id="settings" aria-labelledby="settings-title">
+  <div class="settings-head">
+    <h2 id="settings-title">Settings</h2>
+    <button id="settings-close" class="icon-btn" type="button" aria-label="Close settings">×</button>
+  </div>
+
+  <div class="settings-body">
+
+    <section class="setting">
+      <h3>Theme</h3>
+      <p class="setting-hint">System follows your OS appearance.</p>
+      <div class="segmented" id="theme-row" role="group" aria-label="Theme">
+        <button type="button" class="segment" data-theme-value="system" aria-pressed="false">System</button>
+        <button type="button" class="segment" data-theme-value="light" aria-pressed="false">Light</button>
+        <button type="button" class="segment" data-theme-value="dark" aria-pressed="false">Dark</button>
+      </div>
+    </section>
+
+    <section class="setting">
+      <h3>Tool output</h3>
+      <label class="switch">
+        <input type="checkbox" id="tools-expanded">
+        <span>Expand tool blocks by default</span>
+      </label>
+      <p class="setting-hint">Blocks you have already opened or closed keep their state.</p>
+    </section>
+
+    <section class="setting">
+      <h3>Log background</h3>
+      <p class="setting-hint">Drop an image, or click to choose one. Stored in this browser only.</p>
+
+      <button type="button" class="dropzone" id="dropzone">
+        <span class="dropzone-text" id="dropzone-text">Drop an image here</span>
+      </button>
+      <input type="file" id="bg-file" accept="image/*" hidden>
+
+      <div class="bg-controls" id="bg-controls" hidden>
+        <label class="slider-row">
+          <span>Opacity</span>
+          <input type="range" id="bg-opacity" min="0" max="100" step="5">
+          <output id="bg-opacity-out">50%</output>
+        </label>
+        <button type="button" id="bg-remove" class="btn btn-ghost">Remove background</button>
+      </div>
+
+      <p class="setting-hint" id="bg-status" aria-live="polite"></p>
+    </section>
+
+    <section class="setting danger">
+      <h3>Danger zone</h3>
+      <p class="setting-hint" id="danger-count">Deletes every stored conversation.</p>
+      <p class="setting-hint">This cannot be undone.</p>
+      <div class="danger-row">
+        <input type="text" id="danger-input" class="danger-input"
+               placeholder="Type DELETE to confirm" autocomplete="off" spellcheck="false"
+               aria-label="Type DELETE to confirm">
+        <button type="button" id="danger-btn" class="btn btn-danger" disabled>Delete all</button>
+      </div>
+      <p class="danger-result" id="danger-result" aria-live="polite"></p>
+    </section>
+
+  </div>
+</dialog>
+
+<script src="vendor/marked.min.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script type="module" src="scripts/app.js"></script>
 </body>
 </html>

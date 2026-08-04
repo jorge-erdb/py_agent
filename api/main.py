@@ -9,8 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Literal
+
 import config
 from agent.core import Agent, Tool
+from agent.prompt import build_system_prompt
 from agent.tools import run_shell_command
 from database.db import DatabaseManager
 
@@ -33,26 +35,52 @@ app.add_middleware(
 AGENT_NAME = config.get("agent", "name", "AGENT_NAME", "Kairo")
 AGENT_PERSONA = config.get(
     "agent", "persona", "AGENT_PERSONA",
-    "You are an advanced AI assistant designed to be genuinely helpful and rigorously honest. Your core purpose is to assist users in achieving their goals."
+    "An advanced AI assistant designed to be genuinely helpful and rigorously honest. "
+    "Your core purpose is to assist users in achieving their goals."
 )
+# Free-form operator text appended to the end of the system prompt, after the
+# built-in sections, so it can override them.
+AGENT_INSTRUCTIONS = config.get("agent", "instructions", "AGENT_INSTRUCTIONS", "")
 LLM_BASE_URL = config.get("llm", "base_url", "LLM_BASE_URL", "http://localhost:8080/v1")
 LLM_API_KEY = config.get("llm", "api_key", "LLM_API_KEY", "sk-no-key-needed")
 LLM_MODEL = config.get("llm", "model", "LLM_MODEL", "local-model")
 LLM_TIMEOUT = config.get("llm", "timeout", "LLM_TIMEOUT", 600, cast=int)
 
 
-class SessionManager:
-    """Manages per-session agent instances to prevent race conditions."""
+# Built once, at import time — this module is imported during process startup,
+# so the prompt is fixed for the life of the instance and every session created
+# by it shares this exact string. Restart to pick up config changes.
+SYSTEM_PROMPT = build_system_prompt(
+    AGENT_NAME,
+    AGENT_PERSONA,
+    extra_instructions=AGENT_INSTRUCTIONS,
+)
+logger.info("System prompt built: %d chars", len(SYSTEM_PROMPT))
+logger.debug("System prompt:\n%s", SYSTEM_PROMPT)
 
-    def __init__(self, session_timeout: int = 1800, db: Optional[DatabaseManager] = None):
+
+class SessionManager:
+    """Manages per-session agent instances to prevent race conditions.
+
+    Uses a single global lock for session lookup/creation so that two
+    concurrent requests with the same (possibly stale) session ID never
+    produce duplicate agents.  All DB writes are synchronous — no more
+    fire-and-forget silent failures.
+    """
+
+    def __init__(self, db: Optional[DatabaseManager] = None):
         self.sessions: dict[str, Agent] = {}
         self.session_timestamps: dict[str, float] = {}
-        self.session_queues: dict[str, asyncio.Queue] = {}
-        self.session_results: dict[str, asyncio.Future] = {}
-        self.session_workers_running: dict[str, bool] = {}
         self.session_locks: dict[str, asyncio.Lock] = {}
-        self.session_timeout = session_timeout  # seconds (default 30 min)
-        self.db = db  # Optional database manager for persistence
+        # How many of each agent's history entries are already in the DB.
+        # history[0] is the system prompt and is never stored, so this doubles
+        # as an offset into history[1:] — see persist_new_messages().
+        self.persisted_counts: dict[str, int] = {}
+        self.db = db
+
+        # Global lock protects get_or_create from duplicate creation races.
+        self._global_lock = asyncio.Lock()
+
         # Shared tool configuration (registered per session)
         self._tool = Tool(
             name="run_shell_command",
@@ -67,6 +95,8 @@ class SessionManager:
             }
         )
 
+    # ── Helpers ────────────────────────────────────────────────────────
+
     def _create_agent(self) -> Agent:
         """Create a new agent instance with tool registered."""
         agent = Agent(
@@ -76,135 +106,213 @@ class SessionManager:
             api_key=LLM_API_KEY,
             model=LLM_MODEL,
             timeout=LLM_TIMEOUT,
+            system_prompt=SYSTEM_PROMPT,
         )
         agent.register_tool(self._tool)
         return agent
 
-    def _create_session(self) -> tuple[str, Agent]:
-        """Create a new session and return (session_id, agent)."""
-        session_id = str(uuid.uuid4())
-        agent = self._create_agent()
-        self.sessions[session_id] = agent
-        self.session_timestamps[session_id] = time.time()
-        self.session_locks[session_id] = asyncio.Lock()
-        # Persist session to database
-        if self.db:
-            asyncio.create_task(self.db.create_session(session_id))
-        logger.info("Created new session: %s", session_id[:8])
-        return session_id, agent
-
-    def clear(self, session_id: str) -> bool:
-        """Clear a specific session's history. Returns True if session existed."""
-        if session_id in self.sessions:
-            agent = self.sessions[session_id]
-            agent.history = [
-                {"role": "system", "content": f"You are {agent.name}. {agent.persona}"}
-            ]
-            self.session_timestamps[session_id] = time.time()
-            logger.info("Cleared session: %s", session_id[:8])
-            # Clear in DB
-            if self.db:
-                asyncio.create_task(self.db.clear_session(session_id))
-            return True
-        logger.warning("Clear requested for non-existent session: %s", session_id)
-        return False
-
-    def destroy_all(self) -> int:
-        """Destroy all sessions. Returns the number of sessions destroyed."""
-        count = len(self.sessions)
-        self.sessions.clear()
-        self.session_timestamps.clear()
-        self.session_locks.clear()
-        logger.info("Destroyed %d sessions", count)
-        # Destroy in DB
-        if self.db:
-            asyncio.create_task(self.db.destroy_all_sessions())
-        return count
-
-    def cleanup_expired(self):
-        """Remove sessions that have been idle too long."""
-        now = time.time()
-        expired = [
-            sid for sid, ts in self.session_timestamps.items()
-            if now - ts > self.session_timeout
-        ]
-        for sid in expired:
-            del self.sessions[sid]
-            del self.session_timestamps[sid]
-            self.session_locks.pop(sid, None)
-            # Remove from DB
-            if self.db:
-                asyncio.create_task(self.db.destroy_session(sid))
-
-    async def load_sessions(self):
-        """Load all sessions from the database into memory on startup."""
-        if not self.db:
-            return
-        sessions = await self.db.get_all_sessions()
-        for session_info in sessions:
-            sid = session_info["id"]
-            # Skip if already loaded
-            if sid in self.sessions:
-                continue
-            # Create agent and restore history
-            agent = self._create_agent()
-            self.sessions[sid] = agent
-            self.session_timestamps[sid] = session_info["last_active"]
-            self.session_locks[sid] = asyncio.Lock()
-            # Load message history
-            history = await self.db.get_history(sid)
-            if history:
-                agent.history.extend(history)
-            logger.info("Restored session from DB: %s (%d messages)", sid[:8], len(history))
+    # ── Session lifecycle ──────────────────────────────────────────────
 
     async def get_or_create(self, session_id: Optional[str] = None) -> tuple[str, Agent, asyncio.Lock]:
-        """Get existing session or create a new one. Returns (session_id, agent, lock)."""
-        if session_id and session_id in self.sessions:
-            # Update timestamp
+        """Get existing session or create a new one. Returns (session_id, agent, lock).
+
+        Protected by a global lock so that concurrent requests with the same
+        stale session ID never produce duplicate agents.
+        """
+        async with self._global_lock:
+            # 1. Already in memory — just bump the timestamp
+            if session_id and session_id in self.sessions:
+                self.session_timestamps[session_id] = time.time()
+                return session_id, self.sessions[session_id], self.session_locks[session_id]
+
+            # 2. Exists in DB but not in memory — load it
+            if session_id and self.db:
+                exists = await self.db.session_exists(session_id)
+                if exists:
+                    agent = self._create_agent()
+                    timestamps = await self.db.get_session_timestamps(session_id)
+                    if timestamps:
+                        self.session_timestamps[session_id] = timestamps["last_active"]
+                    # Load history from DB (full OpenAI format with tool_calls)
+                    history = await self.db.get_history(session_id)
+                    if history:
+                        agent.history = [agent.history[0]] + history  # keep system prompt at top
+                    # Everything just loaded is by definition already stored.
+                    self.persisted_counts[session_id] = len(history)
+                    self.sessions[session_id] = agent
+                    self.session_locks[session_id] = asyncio.Lock()
+                    return session_id, agent, self.session_locks[session_id]
+
+            # 3. Brand new session — create in memory and DB
+            if not session_id:
+                session_id = str(uuid.uuid4())
+
+            agent = self._create_agent()
+            self.sessions[session_id] = agent
             self.session_timestamps[session_id] = time.time()
-            # Update activity in database
+            self.session_locks[session_id] = asyncio.Lock()
+            self.persisted_counts[session_id] = 0
+
+            # Persist to DB — this is synchronous, not fire-and-forget
             if self.db:
-                asyncio.create_task(self.db.update_session_activity(session_id))
-            return session_id, self.sessions[session_id], self.session_locks[session_id]
-        # Check if session exists in database but not in memory
-        if session_id and self.db:
-            exists = await self.db.session_exists(session_id)
-            if exists:
-                # Session exists in DB but not in memory — create agent and load history
-                timestamps = await self.db.get_session_timestamps(session_id)
-                agent = self._create_agent()
-                if timestamps:
-                    self.session_timestamps[session_id] = timestamps["last_active"]
-                # Load history from DB
-                history = await self.db.get_history(session_id)
-                if history:
-                    agent.history.extend(history)
-                self.sessions[session_id] = agent
-                self.session_locks[session_id] = asyncio.Lock()
-                # Update activity
+                created = await self.db.create_session(session_id)
+                if not created:
+                    logger.warning("Session %s was created in memory but already exists in DB", session_id[:8])
+                else:
+                    logger.info("Created new session %s in DB", session_id[:8])
+
+            return session_id, agent, self.session_locks[session_id]
+
+    async def clear(self, session_id: str) -> bool:
+        """Clear messages for a session and update timestamps."""
+        async with self._global_lock:
+            if session_id not in self.sessions:
+                return False
+            # Update in-memory timestamp
+            self.session_timestamps[session_id] = time.time()
+            # Persist the clear to DB
+            if self.db:
+                await self.db.clear_session(session_id)
                 await self.db.update_session_activity(session_id)
-                logger.info("Loaded session from DB: %s", session_id[:8])
-                return session_id, agent, self.session_locks[session_id]
-        sid, agent = self._create_session()
-        return sid, agent, self.session_locks[sid]
+            # Clear history in memory (keep system prompt)
+            self.sessions[session_id].history = [self.sessions[session_id].history[0]]
+            # DB rows are gone too, so nothing is persisted any more.
+            self.persisted_counts[session_id] = 0
+            return True
 
-    async def cleanup_task(self):
-        """Background task that periodically cleans up expired sessions."""
-        while True:
-            before = len(self.sessions)
-            self.cleanup_expired()
-            after = len(self.sessions)
-            if before != after:
-                logger.info("Cleaned up %d expired sessions", before - after)
-            await asyncio.sleep(300)  # Check every 5 minutes
+    async def destroy_all(self) -> int:
+        """Destroy all sessions."""
+        async with self._global_lock:
+            count = 0
+            if self.db:
+                count = await self.db.destroy_all_sessions()
+            self.sessions.clear()
+            self.session_timestamps.clear()
+            self.session_locks.clear()
+            self.persisted_counts.clear()
+            return count
+
+    async def destroy_session(self, session_id: str) -> bool:
+        """Destroy a specific session."""
+        async with self._global_lock:
+            removed = False
+            if session_id in self.sessions:
+                del self.sessions[session_id]
+                del self.session_timestamps[session_id]
+                del self.session_locks[session_id]
+                self.persisted_counts.pop(session_id, None)
+                removed = True
+            if self.db:
+                await self.db.destroy_session(session_id)
+            return removed
+
+    async def persist_new_messages(self, session_id: str, agent: Agent) -> int:
+        """Write only the history entries added since the last save.
+
+        The agent accumulates the whole conversation in memory, so saving
+        `history[1:]` wholesale re-inserts every earlier turn and grows the
+        table quadratically. `persisted_counts` records how much of `history`
+        is already on disk; everything past that offset is what is new.
+
+        Returns the number of rows written.
+        """
+        if not self.db:
+            return 0
+
+        already = self.persisted_counts.get(session_id, 0)
+        pending = agent.history[1 + already:]  # skip the system prompt
+        if not pending:
+            return 0
+
+        saved_msgs = []
+        for msg in pending:
+            role = msg.get("role", "assistant")
+
+            if role == "user":
+                saved_msgs.append({
+                    "message_type": "user",
+                    "role": "user",
+                    "content": msg.get("content", ""),
+                })
+            elif role == "tool":
+                saved_msgs.append({
+                    "message_type": "tool",
+                    "role": "tool",
+                    "content": msg.get("content", ""),
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "command": msg.get("command"),
+                    "tool_name": msg.get("tool_name"),
+                })
+            elif role == "assistant" and msg.get("tool_calls"):
+                # Assistant issued tool calls — store the call array as JSON
+                saved_msgs.append({
+                    "message_type": "assistant_tool_call",
+                    "role": "assistant",
+                    "content": json.dumps(msg["tool_calls"]),
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "command": msg.get("command"),
+                    "tool_name": msg.get("tool_name"),
+                })
+            elif role == "assistant":
+                saved_msgs.append({
+                    "message_type": "assistant",
+                    "role": "assistant",
+                    "content": msg.get("content", "") or "",
+                    "tool_call_id": msg.get("tool_call_id"),
+                    "command": msg.get("command"),
+                    "tool_name": msg.get("tool_name"),
+                })
+
+        if saved_msgs:
+            written = await self.db.batch_save_messages(session_id, saved_msgs)
+            if written == 0:
+                # The write failed — leave the offset alone so these messages
+                # are retried on the next turn rather than silently dropped.
+                logger.error(
+                    "Failed to persist %d messages for session %s — will retry",
+                    len(saved_msgs), session_id[:8],
+                )
+                return 0
+
+        # Advance past everything consumed, including any entry no branch above
+        # matched — the offset tracks position in history, not rows written.
+        self.persisted_counts[session_id] = len(agent.history) - 1
+        await self.db.update_session_activity(session_id)
+        return len(saved_msgs)
+
+    async def load_sessions(self):
+        """Load all sessions from DB into memory on startup."""
+        async with self._global_lock:
+            if not self.db:
+                return
+            sessions = await self.db.get_all_sessions()
+            for sess in sessions:
+                sid = sess["id"]
+                # Create a placeholder agent (no history yet) — it will be
+                # fully loaded on first use via get_or_create
+                timestamps = await self.db.get_session_timestamps(sid)
+                if timestamps:
+                    self.session_timestamps[sid] = timestamps["last_active"]
+                else:
+                    self.session_timestamps[sid] = sess["created_at"]
+
+    async def get_sessions(self) -> List[dict]:
+        """Return all sessions (from memory + DB)."""
+        # Always refresh from DB to catch any sessions that might exist there
+        # but weren't loaded (e.g., after a crash where in-memory state was lost)
+        if self.db:
+            return await self.db.get_all_sessions()
+        # Fallback to in-memory only
+        result = []
+        for sid, ts in self.session_timestamps.items():
+            result.append({"id": sid, "last_active": ts})
+        return result
 
 
-# Global session manager (database initialized in lifespan)
-session_manager: SessionManager = None  # type: ignore  # Initialized in lifespan
-
+# ── Pydantic models ────────────────────────────────────────────────────
 
 class Message(BaseModel):
-    role: Literal['system', 'user', 'assistant', 'tool']
+    role: str
     content: str
 
 
@@ -213,117 +321,117 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
 
 
-class ChatResponse(BaseModel):
-    response: str
-    history: List[dict]
+class ClearRequest(BaseModel):
     session_id: str
 
 
-class ClearRequest(BaseModel):
-    session_id: Optional[str] = None
-    all: bool = False
+# ── Session manager instance (wired up in main.py lifespan) ───────────
+
+session_manager: Optional[SessionManager] = None
+
+
+# ── API Routes ─────────────────────────────────────────────────────────
+
+@app.post("/new-session")
+async def new_session():
+    """Create a fresh session. Returns the new session_id."""
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    session_id, _, _ = await session_manager.get_or_create()
+    return {"session_id": session_id}
+
+
+@app.get("/sessions")
+async def list_sessions():
+    """List all sessions."""
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    sessions = await session_manager.get_sessions()
+    return sessions
+
+
+@app.get("/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str):
+    """Get full message history for a session (for the frontend chat log)."""
+    if session_manager is None or not session_manager.db:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    # Check DB exists
+    exists = await session_manager.db.session_exists(session_id)
+    if not exists:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    messages = await session_manager.db.get_session_messages(session_id)
+    return {"session_id": session_id, "messages": messages}
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """Stream each agent message as it's generated (NDJSON format).
+async def chat_stream(request: ChatRequest):
+    """Stream a conversation with the agent.
 
-    The last message is a special {"_session_id": "..."} that the client
-    uses to persist the session across page reloads. The agent yields a
-    {"_final": ...} sentinel before that to signal completion.
+    Yields NDJSON-encoded messages as they arrive, plus a final sentinel
+    message containing the complete history for frontend state sync.
     """
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    # Get or create the session — protected by global lock to prevent races
     session_id, agent, lock = await session_manager.get_or_create(request.session_id)
-    logger.info("Chat request for session: %s", session_id[:8])
 
-    messages_dict = [m.model_dump() for m in request.messages]
+    async def event_generator() -> AsyncGenerator[str, None]:
+        """Yield NDJSON-encoded messages from the agent's reasoning loop."""
+        new_messages = [{"role": m.role, "content": m.content} for m in request.messages]
 
-    async def message_generator() -> AsyncGenerator[str, None]:
-        """Yield each message as a JSON line."""
+        # Use per-session lock to prevent concurrent processing
         async with lock:
-            # Save user messages to DB before processing
-            if session_manager.db:
-                for msg in messages_dict:
-                    if msg["role"] == "user":
-                        await session_manager.db.save_message(
-                            session_id=session_id,
-                            role=msg["role"],
-                            content=msg["content"],
-                        )
+            try:
+                async for msg in agent.process_messages(new_messages):
+                    yield json.dumps(msg) + "\n"
+            except asyncio.CancelledError:
+                logger.info("Stream cancelled for session %s", session_id[:8])
+                raise  # Re-raise to avoid partial history save
 
-            async for msg in agent.process_messages(messages_dict):
-                if msg.get("_final"):
-                    # Sentinel — don't send to client, just marks end
-                    continue
-                # Save assistant/tool messages to DB
-                if session_manager.db and msg.get("role") in ("assistant", "tool"):
-                    await session_manager.db.save_message(
-                        session_id=session_id,
-                        role=msg["role"],
-                        content=msg.get("content", ""),
-                        tool_call_id=msg.get("tool_call_id"),
-                        command=msg.get("command"),
-                        tool_name=msg.get("tool_name"),
-                    )
-                yield json.dumps(msg) + "\n"
-            yield json.dumps({"_session_id": session_id}) + "\n"
+        # Persist only what this turn added — see persist_new_messages().
+        await session_manager.persist_new_messages(session_id, agent)
 
-    return StreamingResponse(message_generator(), media_type="application/x-ndjson")
-
-
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    # Legacy endpoint — collects all yielded messages into a full response
-    session_id, agent, lock = await session_manager.get_or_create(request.session_id)
-    logger.info("Chat request for session: %s", session_id[:8])
-
-    messages_dict = [m.model_dump() for m in request.messages]
-    final_response = None
-    final_history = None
-    async with lock:
-        # Save user messages to DB before processing
-        if session_manager.db:
-            for msg in messages_dict:
-                if msg["role"] == "user":
-                    await session_manager.db.save_message(
-                        session_id=session_id,
-                        role=msg["role"],
-                        content=msg["content"],
-                    )
-
-        async for msg in agent.process_messages(messages_dict):
-            if msg.get("_final"):
-                final_response = msg["response"]
-                final_history = msg["history"]
-                # Save assistant/tool messages to DB
-                if session_manager.db:
-                    for hist_msg in final_history:
-                        if hist_msg.get("role") in ("assistant", "tool"):
-                            await session_manager.db.save_message(
-                                session_id=session_id,
-                                role=hist_msg["role"],
-                                content=hist_msg.get("content", ""),
-                                tool_call_id=hist_msg.get("tool_call_id"),
-                                command=hist_msg.get("command"),
-                                tool_name=hist_msg.get("tool_name"),
-                            )
-                break
-    return ChatResponse(response=final_response, history=final_history, session_id=session_id)
+    return StreamingResponse(
+        event_generator(),
+        media_type="application/x-ndjson",
+    )
 
 
 @app.post("/clear")
 async def clear_history(request: ClearRequest):
-    if request.all:
-        count = session_manager.destroy_all()
-        logger.info("Destroyed %d sessions (all=True)", count)
-        
-        return {"status": "all sessions destroyed", "cleared": True}
+    """Clear a specific session's history."""
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
 
-    elif request.session_id:
-        existed = session_manager.clear(request.session_id)
-        if not existed:
-            return {"status": "session not found", "cleared": False}
-        return {"status": "history cleared", "cleared": True}
+    success = await session_manager.clear(request.session_id)
+    return {"success": success}
 
-    else:
-        raise HTTPException(status_code=400, detail="Either session_id or all=true must be provided.")
-        
+
+@app.post("/destroy_all")
+async def destroy_all_sessions():
+    """Destroy all sessions."""
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    count = await session_manager.destroy_all()
+    return {"destroyed": count}
+
+
+@app.post("/sessions/{session_id}")
+async def destroy_session(session_id: str):
+    """Destroy a specific session."""
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+
+    success = await session_manager.destroy_session(session_id)
+    return {"success": success}
+
+
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint."""
+    return {"status": "ok"}

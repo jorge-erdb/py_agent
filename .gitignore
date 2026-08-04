@@ -30,6 +30,7 @@ data/*
 
 # Local version snapshots (superseded by git)
 .v-control/
+frontend_old/
 
 # Personal system scripts (not part of this project)
 scripts/update.sh
@@ -39,3 +40,6 @@ frontend/assets/background.jpg
 
 # Local config — real API keys belong in ~/.config/py_agent/config.json, never here
 config.json
+
+# Working notes on deferred bugs (not project documentation)
+KNOWN_BUGS.md

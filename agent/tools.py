@@ -122,3 +122,5 @@ async def run_shell_command(command: str) -> str:
             truncate_msg = f"\n... [truncated, {len(result) - MAX_OUTPUT_CHARS} chars omitted — narrow your command]"
             result = result[:MAX_OUTPUT_CHARS] + truncate_msg
         return result
+
+# async def [read tool using 'cat -n']

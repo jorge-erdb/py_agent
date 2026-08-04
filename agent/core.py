@@ -1,7 +1,7 @@
 import json
 import asyncio
 import logging
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class Tool:
         return self.func(**kwargs)
 
 class Agent:
-    def __init__(self, name: str, persona: str, base_url: str = "http://localhost:8080/v1", api_key: str = "sk-no-key-needed", model: str = "local-model", timeout: int = 600, initial_history: list[dict] = None):
+    def __init__(self, name: str, persona: str, base_url: str = "http://localhost:8080/v1", api_key: str = "sk-no-key-needed", model: str = "local-model", timeout: int = 600, initial_history: list[dict] = None, system_prompt: str = None):
         """
         Args:
             name: Agent name used in system prompt.
@@ -29,17 +29,24 @@ class Agent:
             model: Model name sent to the LLM.
             timeout: Request timeout in **seconds** (default 600 / 10 min).
             initial_history: Initial conversation history.
+            system_prompt: Prebuilt system prompt. Built once at process boot
+                and shared by every agent on the instance — see agent.prompt.
+                Falls back to name + persona when not supplied.
         """
         self.name = name
         self.persona = persona
         self.model = model
-        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
+        self.system_prompt = system_prompt or f"You are {name}. {persona}"
+        # Async client: the reasoning loop runs inside the server's event loop,
+        # so a blocking call here would stall every other session for the full
+        # duration of inference.
+        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         
         if initial_history is not None:
             self.history = initial_history
         else:
             self.history = [
-                {"role": "system", "content": f"You are {name}. {persona}"}
+                {"role": "system", "content": self.system_prompt}
             ]
         self.tools = {}
 
@@ -79,7 +86,7 @@ class Agent:
         while True:
             # 1. Get response from LLM
             try:
-                response = self.client.chat.completions.create(
+                response = await self.client.chat.completions.create(
                     model=self.model,
                     messages=self.history,
                     tools=await self._get_tool_definitions() if self.tools else None,

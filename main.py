@@ -1,5 +1,4 @@
 import logging
-import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -34,8 +33,6 @@ async def lifespan(app):
     # Load existing sessions from database
     await sm.load_sessions()
 
-    # Start the session cleanup background task
-    asyncio.create_task(sm.cleanup_task())
     yield
 
     # Close database connection on shutdown

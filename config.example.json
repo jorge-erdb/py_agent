@@ -9,8 +9,10 @@
   },
 
   "agent": {
+    "_comment": "The system prompt is assembled at startup from these values plus built-in environment and shell-policy sections. Restart to apply changes. 'persona' describes the agent — it does not need to restate the name. 'instructions' is appended last, after the built-in sections, so it can override them.",
     "name": "Kairo",
-    "persona": "You are an advanced AI assistant designed to be genuinely helpful and rigorously honest. Your core purpose is to assist users in achieving their goals."
+    "persona": "An advanced AI assistant designed to be genuinely helpful and rigorously honest. Your core purpose is to assist users in achieving their goals.",
+    "instructions": ""
   },
 
   "server": {

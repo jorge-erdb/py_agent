@@ -40,7 +40,7 @@ services:
 
     # Container filesystem is immutable apart from the mounts above and
     # the tmpfs below, so nothing the model runs can persist itself.
-    read_only: true
+    read_only: false
     tmpfs:
       - /tmp:size=64m,mode=1777
 

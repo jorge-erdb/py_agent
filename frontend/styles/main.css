@@ -1,0 +1,975 @@
+/* Agent Console — chat surface
+   Layout is a three-row grid: topbar / scrolling log / composer. */
+
+:root {
+  --bg: #f7f7f8;
+  /* Same colour as --bg, as channels, so it can be given an alpha. Used by the
+     log background veil; keep the two in sync when either changes. */
+  --bg-rgb: 247, 247, 248;
+  --surface: #ffffff;
+  --surface-rgb: 255, 255, 255;
+  --surface-2: #f0f0f2;
+  --border: #e2e2e6;
+  --text: #1a1a1f;
+  --text-dim: #6b6b76;
+  --accent: #4f46e5;
+  --accent-text: #ffffff;
+  --danger: #dc2626;
+  --ok: #16a34a;
+
+  --user-bg: #4f46e5;
+  --user-text: #ffffff;
+
+  /* Translucent so the scrollbar reads correctly over the chat background
+     image as well as over flat surfaces. */
+  --scroll-thumb: rgba(0, 0, 0, 0.22);
+  --scroll-thumb-hover: rgba(0, 0, 0, 0.38);
+
+  /* Shared height for the two headers that sit side by side — the topbar and
+     the sidebar's own head — so their bottom borders line up across the seam.
+     Applied as a min-height rather than a height: the topbar's natural height
+     is ~62px (its New/Clear buttons are 37px tall, against 30px for the
+     sidebar's icon button), and a hard height below that clips the content.
+     Keep this at or above the taller header's natural height. */
+  --header-h: 64px;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Theme resolution, in order:
+     1. :root above          — light palette, the baseline
+     2. media query below    — dark, but only when the user has not forced light
+     3. [data-theme="dark"]  — dark, forced; last so it beats the media query
+   settings.js sets data-theme on <html>; removing it returns to the OS. */
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #131316;
+    --bg-rgb: 19, 19, 22;
+    --surface: #1b1b20;
+    --surface-rgb: 27, 27, 32;
+    --surface-2: #232329;
+    --border: #2e2e36;
+    --text: #ececf1;
+    --text-dim: #9a9aa6;
+    --accent: #7c73ff;
+    --danger: #f87171;
+    --ok: #4ade80;
+
+    --user-bg: #2f2b6b;
+    --user-text: #ececf1;
+
+    --scroll-thumb: rgba(255, 255, 255, 0.18);
+    --scroll-thumb-hover: rgba(255, 255, 255, 0.32);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #131316;
+  --bg-rgb: 19, 19, 22;
+  --surface: #1b1b20;
+  --surface-rgb: 27, 27, 32;
+  --surface-2: #232329;
+  --border: #2e2e36;
+  --text: #ececf1;
+  --text-dim: #9a9aa6;
+  --accent: #7c73ff;
+  --danger: #f87171;
+  --ok: #4ade80;
+
+  --user-bg: #2f2b6b;
+  --user-text: #ececf1;
+
+  --scroll-thumb: rgba(255, 255, 255, 0.18);
+  --scroll-thumb-hover: rgba(255, 255, 255, 0.32);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────
+   Applies to every scroll container: the log, the sidebar list, tool output,
+   the settings dialog, the composer textarea and code blocks.
+
+   The WebKit pseudo-elements come first because they allow the rounded,
+   inset thumb; `scrollbar-color` cannot express that. They are NOT paired with
+   the standard properties globally on purpose — since Chromium 121, setting
+   `scrollbar-color` or `scrollbar-width` on an element switches it to the
+   standard scrollbar and ignores ::-webkit-scrollbar entirely, which would
+   throw away the styling below. The @supports block therefore scopes the
+   standard properties to engines without the pseudo-elements (Firefox). */
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* The transparent border plus background-clip is what insets the thumb, so it
+   reads as a floating pill rather than filling the whole gutter. */
+::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scroll-thumb-hover);
+}
+
+/* Chrome draws stepper buttons on some platforms; they do not fit the styling. */
+::-webkit-scrollbar-button { display: none; }
+
+::-webkit-scrollbar-corner { background: transparent; }
+
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+}
+
+/* Main column: topbar / log / composer (the status indicator now sits inside
+   the topbar). */
+.main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100%;
+}
+
+/* Custom background image, set by background.js as --chat-bg (an object URL).
+   It sits here rather than on .log so it also shows behind the transparent
+   composer. `background-image` has no opacity of its own, so readability is
+   controlled by painting a veil of the theme's own --bg over it — which also
+   means the background tracks light/dark without touching the image. */
+.main.has-bg {
+  background-image:
+    linear-gradient(rgba(var(--bg-rgb), var(--chat-veil, 0.5)),
+                    rgba(var(--bg-rgb), var(--chat-veil, 0.5))),
+    var(--chat-bg);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+/* ── History sidebar ─────────────────────────────────────────────────
+   Docked beside the chat on wide screens; a slide-over drawer below 900px,
+   where .open and the scrim take over. */
+
+.history {
+  width: 280px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 12px 16px;
+  min-height: var(--header-h);
+  border-bottom: 1px solid var(--border);
+}
+
+.history-head h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.history-notice {
+  margin: 0;
+  padding: 12px 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.session {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.session:hover { background: var(--surface-2); }
+
+.session.active { background: var(--surface-2); }
+
+.session.active .session-title { color: var(--accent); }
+
+.session-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.session-title {
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-title.is-loading,
+.session-title.is-empty {
+  color: var(--text-dim);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.session-meta {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.session-delete {
+  flex-shrink: 0;
+  width: 28px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.session:hover .session-delete,
+.session-delete:focus-visible { opacity: 1; }
+
+.session-delete:hover { color: var(--danger); }
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.scrim[hidden] { display: none; }
+
+/* ── Icon buttons ────────────────────────────────────────────────────── */
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+
+/* ── Topbar ──────────────────────────────────────────────────────── */
+
+/* Three columns with equal-weight outer tracks, so the centre cell is centred
+   against the topbar rather than against whatever the two side groups happen
+   to measure. */
+.topbar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--header-h);
+  padding: 12px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-actions { justify-self: end; }
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  grid-column: 3;
+}
+
+.conn {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-inline-end: 4px;
+}
+
+.conn::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  vertical-align: middle;
+}
+
+.conn[data-state="online"]::before { background: var(--ok); }
+.conn[data-state="offline"]::before { background: var(--danger); }
+
+/* ── Buttons ─────────────────────────────────────────────────────── */
+
+.btn {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+
+.btn-ghost:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.btn-primary:hover { filter: brightness(1.08); }
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.btn-danger:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ── Log ─────────────────────────────────────────────────────────── */
+
+.log {
+  overflow-y: auto;
+  padding: 24px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scroll-behavior: smooth;
+}
+
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.empty-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.empty-sub {
+  margin: 0;
+  font-size: 14px;
+}
+
+.msg {
+  max-width: 780px;
+  width: 100%;
+  margin-inline: auto;
+  flex-shrink: 0;
+}
+
+.msg-role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.msg-body {
+  padding: 12px 16px;
+  border-radius: var(--radius) 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.msg-user .msg-body {
+  background: var(--user-bg);
+  border-color: transparent;
+  color: var(--user-text);
+  white-space: pre-wrap;
+}
+
+.msg-system .msg-body {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-dim);
+  font-size: 14px;
+}
+
+/* Markdown inside assistant messages */
+
+.msg-body > :first-child { margin-top: 0; }
+.msg-body > :last-child { margin-bottom: 0; }
+
+.msg-body pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.msg-body code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+.msg-body :not(pre) > code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+}
+
+.msg-body table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.msg-body th,
+.msg-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+/* ── Tool blocks ─────────────────────────────────────────────────── */
+
+.tool {
+  max-width: 780px;
+  width: 100%;
+  margin-inline: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+
+  /* The log is a flex column, so its children shrink once the content
+     overflows. `overflow: hidden` above resolves this element's `min-height`
+     from `auto` to `0`, which removes the content floor that keeps .msg intact
+     and lets tool blocks collapse to a 2px line in long conversations. */
+  flex-shrink: 0;
+}
+
+.tool-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  list-style: none;
+}
+
+.tool-summary::-webkit-details-marker { display: none; }
+
+.tool-summary::before {
+  content: "▸";
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.tool[open] .tool-summary::before { content: "▾"; }
+
+.tool-summary:hover { background: var(--surface-2); }
+
+.tool-name {
+  font-weight: 600;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.tool-command {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-output {
+  margin: 0;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+/* ── Status ──────────────────────────────────────────────────────── */
+
+/* Lives in the topbar's centre cell. `hidden` must beat `display: flex`, so it
+   is declared after. */
+.status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  grid-column: 2;
+  font-size: 13px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.status[hidden] { display: none; }
+
+.spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2s; }
+  .log { scroll-behavior: auto; }
+}
+
+/* ── Composer ────────────────────────────────────────────────────── */
+
+/* Transparent so the chat background shows through; the form itself is the
+   only visible surface, which is what makes it read as floating. */
+.composer {
+  padding: 12px 20px 20px;
+  background: transparent;
+}
+
+.composer-form {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  max-width: 780px;
+  margin-inline: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+
+  /* Slightly translucent over a blur rather than a flat fill, so the image
+     behind reads through without costing legibility in the input. */
+  background: rgba(var(--surface-rgb), 0.82);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+}
+
+.composer-form:focus-within { border-color: var(--accent); }
+
+.input {
+  flex: 1;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  resize: none;
+  outline: none;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 6px 4px;
+}
+
+.input::placeholder { color: var(--text-dim); }
+.input:disabled { opacity: 0.5; }
+
+.composer-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+/* ── Settings dialog ─────────────────────────────────────────────────── */
+
+.settings {
+  width: min(460px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+.settings::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 12px 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-body {
+  padding: 4px 20px 20px;
+  max-height: min(70vh, 560px);
+  overflow-y: auto;
+}
+
+.setting {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.setting:last-child { border-bottom: 0; }
+
+.setting h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setting-hint {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+/* Segmented control (theme picker) */
+
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 3px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.segment {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.segment:hover { color: var(--text); }
+
+.segment.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.segment:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Checkbox row */
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+
+.switch input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* Background drop zone */
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 20px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1.5px dashed var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.dropzone:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.dropzone:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* While a file is hovering over the zone. */
+.dropzone.is-over {
+  border-color: var(--accent);
+  border-style: solid;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.dropzone-icon { font-size: 20px; }
+
+/* Children would otherwise become the dragleave/drop event target and make the
+   hover state flicker as the pointer crosses them. */
+.dropzone * { pointer-events: none; }
+
+.bg-controls {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.bg-controls[hidden] { display: none; }
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  font-size: 13px;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.slider-row output {
+  min-width: 3.5ch;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+/* Danger zone */
+
+.setting.danger h3 { color: var(--danger); }
+
+.danger-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.danger-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.danger-input:focus {
+  outline: none;
+  border-color: var(--danger);
+}
+
+.btn-danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-danger:disabled:hover {
+  background: transparent;
+  color: var(--danger);
+}
+
+.danger-result {
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  min-height: 1em;
+}
+
+/* Retractable docked sidebar. Only applies above the drawer breakpoint — below
+   it the sidebar is already off-canvas and `sidebar-collapsed` means nothing. */
+@media (min-width: 901px) {
+  .history {
+    transition: width 0.18s ease;
+  }
+
+  body.sidebar-collapsed .history {
+    width: 0;
+    border-right-width: 0;
+  }
+}
+
+/* Below this width the sidebar undocks and becomes a slide-over drawer. */
+@media (max-width: 900px) {
+  .history {
+    position: fixed;
+    inset-block: 0;
+    left: 0;
+    z-index: 10;
+    width: min(300px, 85vw);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+
+  .history.open {
+    transform: none;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.3);
+  }
+
+  /* Touch has no hover, so the delete control cannot hide behind one. */
+  .session-delete { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .history { transition: none; }
+}
+
+@media (max-width: 600px) {
+  .log { padding: 16px 12px; }
+  .composer { padding: 8px 12px 12px; }
+  .topbar { padding: 10px 12px; }
+}
