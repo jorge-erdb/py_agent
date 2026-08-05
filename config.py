@@ -3,41 +3,30 @@
 Values are resolved in this order, first match wins:
 
     1. Environment variable      (LLM_BASE_URL=... python main.py)
-    2. User config file          (~/.config/py_agent/config.json)
+    2. Config file               (<repo>/config.json)
     3. Built-in default
 
-The user config file lives outside the repository, so API keys never land in
-git and local tweaks never show up in `git status`. Environment variables win
-over the file so container runtimes can override without touching the host.
+The config file sits next to this module and is gitignored, so API keys never
+land in git and local tweaks never show up in `git status`. Environment
+variables win over the file so container runtimes can override it without
+editing anything on disk.
 """
 
 import json
 import logging
 import os
-import stat
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 def config_path() -> Path:
-    """Location of the user config file, honouring XDG_CONFIG_HOME."""
-    base = os.getenv("XDG_CONFIG_HOME")
-    root = Path(base) if base else Path.home() / ".config"
-    return root / "py_agent" / "config.json"
+    """Location of the config file: alongside this module, at the repo root.
 
-
-def _warn_if_readable_by_others(path: Path) -> None:
-    """Config files holding an API key should not be world/group readable."""
-    try:
-        mode = path.stat().st_mode
-    except OSError:
-        return
-    if mode & (stat.S_IRGRP | stat.S_IROTH):
-        logger.warning(
-            "%s is readable by other users. If it contains an API key, run: chmod 600 %s",
-            path, path,
-        )
+    Derived from __file__ rather than the working directory so the file is
+    found no matter where the process is launched from.
+    """
+    return Path(__file__).resolve().parent / "config.json"
 
 
 def _load() -> dict:
@@ -58,9 +47,6 @@ def _load() -> dict:
     if not isinstance(data, dict):
         logger.warning("Ignoring %s — expected a JSON object at the top level", path)
         return {}
-
-    if isinstance(data.get("llm"), dict) and data["llm"].get("api_key"):
-        _warn_if_readable_by_others(path)
 
     logger.info("Loaded config from %s", path)
     return data

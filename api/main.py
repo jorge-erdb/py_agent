@@ -3,16 +3,15 @@ import asyncio
 import time
 import json
 import logging
-from typing import Optional, AsyncGenerator
-from fastapi import FastAPI, HTTPException, Request
+from typing import AsyncGenerator, List, Literal, Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Literal
 
 import config
 from agent.core import Agent, Tool
-from agent.prompt import build_system_prompt
+from agent.prompt import AGENT_NAME, AGENT_PERSONA, build_configured_prompt
 from agent.tools import run_shell_command
 from database.db import DatabaseManager
 
@@ -21,40 +20,63 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 
-# Enable CORS for the frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _parse_origins(value) -> list[str]:
+    """Accept a JSON array from the config file or a comma-separated env var."""
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = str(value or "").split(",")
+    return [str(item).strip() for item in items if str(item).strip()]
 
 
-# Configuration: environment > ~/.config/py_agent/config.json > default
-AGENT_NAME = config.get("agent", "name", "AGENT_NAME", "Kairo")
-AGENT_PERSONA = config.get(
-    "agent", "persona", "AGENT_PERSONA",
-    "An advanced AI assistant designed to be genuinely helpful and rigorously honest. "
-    "Your core purpose is to assist users in achieving their goals."
+# Cross-origin access is off by default. main.py serves the frontend from this
+# same origin, so the bundled UI never needs CORS — the only thing a wildcard
+# enabled was *other* websites reaching an unauthenticated agent that runs shell
+# commands. Set this only if you serve the frontend from somewhere else.
+CORS_ORIGINS = _parse_origins(
+    config.get("server", "cors_origins", "CORS_ORIGINS", "", cast=lambda v: v)
 )
-# Free-form operator text appended to the end of the system prompt, after the
-# built-in sections, so it can override them.
-AGENT_INSTRUCTIONS = config.get("agent", "instructions", "AGENT_INSTRUCTIONS", "")
+
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    if "*" in CORS_ORIGINS:
+        logger.warning(
+            "CORS is set to '*' — any web page you visit can drive this agent, "
+            "and there is no authentication. See SECURITY.md."
+        )
+    else:
+        logger.info("CORS enabled for: %s", ", ".join(CORS_ORIGINS))
+else:
+    logger.info("CORS disabled — same-origin requests only")
+
+
+# Configuration: environment > <repo>/config.json > default
+# The agent.* settings are resolved in agent.prompt, alongside the prompt they
+# configure; AGENT_NAME is re-exported here because the Agent also carries it.
 LLM_BASE_URL = config.get("llm", "base_url", "LLM_BASE_URL", "http://localhost:8080/v1")
 LLM_API_KEY = config.get("llm", "api_key", "LLM_API_KEY", "sk-no-key-needed")
 LLM_MODEL = config.get("llm", "model", "LLM_MODEL", "local-model")
 LLM_TIMEOUT = config.get("llm", "timeout", "LLM_TIMEOUT", 600, cast=int)
 
+# How long a session may sit untouched before it is dropped from memory. This
+# unloads, it never deletes: the conversation stays in SQLite and is rebuilt on
+# the next request. Set to 0 to keep every session resident for the life of the
+# process.
+SESSION_IDLE_TTL = config.get(
+    "sessions", "idle_ttl", "SESSION_IDLE_TTL", 1800, cast=int
+)
+
 
 # Built once, at import time — this module is imported during process startup,
 # so the prompt is fixed for the life of the instance and every session created
 # by it shares this exact string. Restart to pick up config changes.
-SYSTEM_PROMPT = build_system_prompt(
-    AGENT_NAME,
-    AGENT_PERSONA,
-    extra_instructions=AGENT_INSTRUCTIONS,
-)
+SYSTEM_PROMPT = build_configured_prompt()
 logger.info("System prompt built: %d chars", len(SYSTEM_PROMPT))
 logger.debug("System prompt:\n%s", SYSTEM_PROMPT)
 
@@ -111,6 +133,72 @@ class SessionManager:
         agent.register_tool(self._tool)
         return agent
 
+    async def _unload_idle(self, exclude: Optional[str] = None) -> int:
+        """Drop idle sessions from memory. **Nothing is deleted.**
+
+        The in-memory Agent is a cache: `get_or_create` can rebuild one from
+        SQLite whenever it is asked for. Without this the four dicts only ever
+        shrink on an explicit destroy, so every session opened since boot stays
+        resident — each holding a full history and, more to the point, an
+        `AsyncOpenAI` client with its own connection pool that nothing closes.
+
+        `session_timestamps` is deliberately left intact. It is the record of
+        what exists and when it was last touched, it costs a float per session,
+        and `get_or_create` needs nothing more to bring one back.
+
+        Caller must hold `_global_lock`.
+
+        Args:
+            exclude: Session to leave resident — the one being served, which
+                would otherwise be unloaded and reloaded in the same call.
+
+        Returns:
+            How many sessions were unloaded.
+        """
+        if SESSION_IDLE_TTL <= 0:
+            return 0
+
+        cutoff = time.time() - SESSION_IDLE_TTL
+        stale = []
+
+        for sid, agent in self.sessions.items():
+            if sid == exclude:
+                continue
+            if self.session_timestamps.get(sid, 0.0) > cutoff:
+                continue
+            # A held lock means a stream is in flight on this session.
+            lock = self.session_locks.get(sid)
+            if lock is not None and lock.locked():
+                continue
+            # A cancelled stream skips persist_new_messages, leaving history
+            # in memory that never reached SQLite. Unloading would be the only
+            # thing that could actually lose data, so don't — it will be
+            # written on the session's next turn.
+            if self.persisted_counts.get(sid, 0) != len(agent.history) - 1:
+                logger.debug(
+                    "Keeping idle session %s resident — unpersisted history", sid[:8]
+                )
+                continue
+            stale.append(sid)
+
+        for sid in stale:
+            agent = self.sessions.pop(sid)
+            self.session_locks.pop(sid, None)
+            self.persisted_counts.pop(sid, None)
+            try:
+                await agent.client.close()
+            except Exception as e:
+                # A pool that will not close is not a reason to keep the
+                # session in memory.
+                logger.warning("Error closing LLM client for %s: %s", sid[:8], e)
+
+        if stale:
+            logger.info(
+                "Unloaded %d idle session(s) from memory; %d still resident",
+                len(stale), len(self.sessions),
+            )
+        return len(stale)
+
     # ── Session lifecycle ──────────────────────────────────────────────
 
     async def get_or_create(self, session_id: Optional[str] = None) -> tuple[str, Agent, asyncio.Lock]:
@@ -120,6 +208,11 @@ class SessionManager:
         stale session ID never produce duplicate agents.
         """
         async with self._global_lock:
+            # Reclaim anything that has gone idle. Done here rather than on a
+            # background task so there is no second source of mutation for
+            # these dicts — the global lock is already held.
+            await self._unload_idle(exclude=session_id)
+
             # 1. Already in memory — just bump the timestamp
             if session_id and session_id in self.sessions:
                 self.session_timestamps[session_id] = time.time()
@@ -164,21 +257,52 @@ class SessionManager:
             return session_id, agent, self.session_locks[session_id]
 
     async def clear(self, session_id: str) -> bool:
-        """Clear messages for a session and update timestamps."""
+        """Clear a session's messages, resident in memory or not.
+
+        `load_sessions()` only populates `session_timestamps`; `self.sessions`
+        is filled lazily by `get_or_create` on first use. Gating on memory
+        residency therefore made Clear a silent no-op on exactly the sessions
+        restored from disk after a restart — the rows survived untouched and
+        the conversation reappeared on the next reload.
+
+        Returns False only when the session exists in neither memory nor DB.
+        """
         async with self._global_lock:
-            if session_id not in self.sessions:
+            resident = session_id in self.sessions
+
+            known = resident
+            if not known and self.db:
+                known = await self.db.session_exists(session_id)
+            if not known:
                 return False
-            # Update in-memory timestamp
+
             self.session_timestamps[session_id] = time.time()
-            # Persist the clear to DB
+
             if self.db:
+                # The row count is not the signal here — clearing a session
+                # that had no messages yet is still a success.
                 await self.db.clear_session(session_id)
                 await self.db.update_session_activity(session_id)
-            # Clear history in memory (keep system prompt)
-            self.sessions[session_id].history = [self.sessions[session_id].history[0]]
-            # DB rows are gone too, so nothing is persisted any more.
-            self.persisted_counts[session_id] = 0
+
+            if resident:
+                agent = self.sessions[session_id]
+                agent.history = [agent.history[0]]  # keep the system prompt
+                # DB rows are gone too, so nothing is persisted any more.
+                self.persisted_counts[session_id] = 0
+            else:
+                # Nothing to trim in memory, but make sure no stale offset
+                # survives to desync the next load.
+                self.persisted_counts.pop(session_id, None)
+
             return True
+
+    @staticmethod
+    async def _close_client(session_id: str, agent: Agent) -> None:
+        """Release an agent's LLM client and its connection pool."""
+        try:
+            await agent.client.close()
+        except Exception as e:
+            logger.warning("Error closing LLM client for %s: %s", session_id[:8], e)
 
     async def destroy_all(self) -> int:
         """Destroy all sessions."""
@@ -186,6 +310,8 @@ class SessionManager:
             count = 0
             if self.db:
                 count = await self.db.destroy_all_sessions()
+            for sid, agent in self.sessions.items():
+                await self._close_client(sid, agent)
             self.sessions.clear()
             self.session_timestamps.clear()
             self.session_locks.clear()
@@ -197,7 +323,7 @@ class SessionManager:
         async with self._global_lock:
             removed = False
             if session_id in self.sessions:
-                del self.sessions[session_id]
+                await self._close_client(session_id, self.sessions.pop(session_id))
                 del self.session_timestamps[session_id]
                 del self.session_locks[session_id]
                 self.persisted_counts.pop(session_id, None)
@@ -205,6 +331,20 @@ class SessionManager:
             if self.db:
                 await self.db.destroy_session(session_id)
             return removed
+
+    async def shutdown(self) -> None:
+        """Release every resident session's LLM client.
+
+        Called from the lifespan teardown. Without it, uvicorn's shutdown leaves
+        httpx connection pools to be reclaimed by the garbage collector, which
+        logs unclosed-session warnings on the way out.
+        """
+        async with self._global_lock:
+            for sid, agent in self.sessions.items():
+                await self._close_client(sid, agent)
+            self.sessions.clear()
+            self.session_locks.clear()
+            self.persisted_counts.clear()
 
     async def persist_new_messages(self, session_id: str, agent: Agent) -> int:
         """Write only the history entries added since the last save.
@@ -312,7 +452,12 @@ class SessionManager:
 # ── Pydantic models ────────────────────────────────────────────────────
 
 class Message(BaseModel):
-    role: str
+    # Only "user" is accepted. `chat_stream` copies this straight into
+    # agent.history, so a client posting role="system" would rewrite the
+    # agent's instructions mid-conversation — and there is no auth in front of
+    # this endpoint. Pydantic rejects anything else with a 422 before the
+    # handler runs. The frontend only ever sends "user" (api.js:34).
+    role: Literal["user"]
     content: str
 
 
@@ -421,9 +566,9 @@ async def destroy_all_sessions():
     return {"destroyed": count}
 
 
-@app.post("/sessions/{session_id}")
+@app.delete("/sessions/{session_id}")
 async def destroy_session(session_id: str):
-    """Destroy a specific session."""
+    """Destroy a specific session and all of its messages. Irreversible."""
     if session_manager is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
 

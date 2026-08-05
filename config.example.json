@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to ~/.config/py_agent/config.json and edit. Every key is optional; anything omitted falls back to the built-in default. Environment variables override this file. If you put a real API key here, run: chmod 600 ~/.config/py_agent/config.json",
+  "_comment": "Copy to config.json in this directory and edit. Every key is optional; anything omitted falls back to the built-in default. Environment variables override this file. config.json is gitignored and dockerignored. If you put a real API key here, run: chmod 600 config.json",
 
   "llm": {
     "base_url": "http://localhost:8080/v1",

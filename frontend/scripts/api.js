@@ -84,14 +84,10 @@ export async function fetchSessions() {
   return response.json();
 }
 
-/**
- * Destroy a session permanently.
- *
- * Note the verb: the backend exposes this as POST /sessions/{id}, not DELETE.
- */
+/** Destroy a session and all of its messages permanently. Irreversible. */
 export async function destroySession(sessionId) {
   const url = `${CONFIG.ENDPOINTS.SESSIONS}/${encodeURIComponent(sessionId)}`;
-  const response = await fetch(url, { method: 'POST' });
+  const response = await fetch(url, { method: 'DELETE' });
   if (!response.ok) throw new Error(`Server responded ${response.status}`);
   return response.json();
 }

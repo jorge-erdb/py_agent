@@ -39,17 +39,15 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Settings resolve in three layers — **environment variable**, then **user config
+Settings resolve in three layers — **environment variable**, then **config
 file**, then **built-in default**. Everything is optional.
 
-The config file lives outside the repository at
-`~/.config/py_agent/config.json` (or `$XDG_CONFIG_HOME/py_agent/config.json`), so
+The config file is `config.json` at the repository root. It is gitignored, so
 API keys never touch git and local tweaks never show up in `git status`:
 
 ```bash
-mkdir -p ~/.config/py_agent
-cp config.example.json ~/.config/py_agent/config.json
-chmod 600 ~/.config/py_agent/config.json   # if it will hold a real API key
+cp config.example.json config.json
+chmod 600 config.json   # do this if it will hold a real API key — nothing checks for you
 ```
 
 A malformed or unreadable config file is logged and ignored rather than fatal.
@@ -148,7 +146,7 @@ prompt-injected model could read back to whoever is chatting with it.
 py_agent/
 ├── main.py                  # Entry point — launches uvicorn + serves frontend
 ├── config.py                # Layered config: env > user file > default
-├── config.example.json      # Template for ~/.config/py_agent/config.json
+├── config.example.json      # Template for config.json (gitignored)
 ├── requirements.txt         # Pinned Python dependencies
 ├── SECURITY.md              # Trust model and boundaries
 ├── Dockerfile               # Container image

@@ -129,20 +129,37 @@ class Agent:
             if message.tool_calls:
                 for tool_call in message.tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
 
-                    logger.info("Tool call: %s(%s)", function_name, function_args)
-
-                    if function_name in self.tools:
-                        try:
-                            result = await self.tools[function_name].execute(**function_args)
-                            result_str = str(result)
-                        except Exception as e:
-                            logger.error("Tool %s error: %s", function_name, e)
-                            result_str = f"Error: {str(e)}"
+                    # Local models emit malformed `arguments` often enough that a
+                    # parse failure has to become a tool result rather than an
+                    # exception: raising here tears down the NDJSON stream, and
+                    # since the turn is only persisted once this generator
+                    # finishes, the whole turn would be lost. Handing the error
+                    # back as the result lets the model correct itself instead.
+                    try:
+                        function_args = json.loads(tool_call.function.arguments)
+                        if not isinstance(function_args, dict):
+                            raise ValueError("expected a JSON object")
+                    except (json.JSONDecodeError, ValueError, TypeError) as e:
+                        logger.warning("Malformed arguments for %s: %s", function_name, e)
+                        function_args = {}
+                        result_str = (
+                            f"Error: could not parse the arguments to {function_name} as JSON: {e}. "
+                            "Re-issue the call with valid JSON."
+                        )
                     else:
-                        logger.warning("Unknown tool: %s", function_name)
-                        result_str = f"Error: Tool {function_name} not found."
+                        logger.info("Tool call: %s(%s)", function_name, function_args)
+
+                        if function_name in self.tools:
+                            try:
+                                result = await self.tools[function_name].execute(**function_args)
+                                result_str = str(result)
+                            except Exception as e:
+                                logger.error("Tool %s error: %s", function_name, e)
+                                result_str = f"Error: {str(e)}"
+                        else:
+                            logger.warning("Unknown tool: %s", function_name)
+                            result_str = f"Error: Tool {function_name} not found."
 
                     tool_entry = {
                         "role": "tool",

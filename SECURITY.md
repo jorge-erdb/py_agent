@@ -84,9 +84,23 @@ as destructive in any tooling that touches this API.
 
 ## Secrets
 
-- `~/.config/py_agent/config.json` may hold real API keys. Run
-  `chmod 600` on it; the server warns at startup if it is group- or
-  world-readable.
+- `config.json` at the repository root may hold real API keys. **Nothing checks
+  its permissions for you** — a fresh copy of `config.example.json` is created
+  `-rw-r--r--`, readable by every account on the machine. If you put a real key
+  in it, run:
+
+  ```bash
+  chmod 600 config.json
+  ```
+
+  The file is gitignored and dockerignored, so it is never committed and never
+  baked into an image. Under compose, configure the container through the
+  `environment:` block instead — environment variables outrank the file.
+- If you mount the directory containing this repository into the container
+  read-only (the default compose file mounts `${HOME}/Projects`), then
+  `config.json` is inside that mount and the agent can `cat` its own API key.
+  Keep the checkout outside any mounted path, or accept that the key is
+  readable by the model.
 - Conversation history — including full command output — is stored unencrypted in
   `data/agent.db`. Anything the agent reads may be persisted there.
 - The agent can read any file its user account can read, and repeat the contents

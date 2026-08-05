@@ -14,7 +14,24 @@ import re
 import sys
 from pathlib import Path
 
-from agent.tools import BLACKLIST_PATTERNS, COMMAND_WHITELIST, MAX_OUTPUT_CHARS
+import config
+from agent.tools import (
+    COMMAND_TIMEOUT_SECONDS,
+    COMMAND_WHITELIST,
+    MAX_OUTPUT_CHARS,
+)
+
+# Resolved here rather than in api.main so that the prompt and everything that
+# configures it live together — api.main imports these, and `python -m
+# agent.prompt` gets the same values without a circular import.
+AGENT_NAME = config.get("agent", "name", "AGENT_NAME", "Pygent")
+AGENT_PERSONA = config.get(
+    "agent", "persona", "AGENT_PERSONA",
+    "An AI assistant designed to be helpful."
+)
+# Free-form operator text appended to the end of the system prompt, after the
+# built-in sections, so it can override them.
+AGENT_INSTRUCTIONS = config.get("agent", "instructions", "AGENT_INSTRUCTIONS", "")
 
 
 def _in_container() -> bool:
@@ -46,18 +63,6 @@ def _environment() -> str:
     return "# Environment\n\n" + "\n".join(facts)
 
 
-def _describe_pattern(pattern: str) -> str:
-    """Render a blacklist regex as something readable in a prompt.
-
-    Strips the word-boundary and escape noise so `\\bsudo\\b` reads as `sudo`
-    and `\\bdd\\b\\s+if=` reads as `dd if=`. Patterns that survive as
-    regex-looking text are still worth showing — the point is that this list
-    stays generated from the code that enforces it.
-    """
-    readable = re.sub(r"\\s\+?", " ", pattern)
-    return re.sub(r"\\b|\\", "", readable).strip()
-
-
 def _shell_policy() -> str:
     """The run_shell_command rules.
 
@@ -66,17 +71,23 @@ def _shell_policy() -> str:
     burns turns discovering that `rm` and `git` are refused.
     """
     allowed = ", ".join(f"`{c}`" for c in COMMAND_WHITELIST)
-    blocked = ", ".join(f"`{_describe_pattern(p)}`" for p in BLACKLIST_PATTERNS)
     return f"""# Shell access
 
 You have one tool, `run_shell_command`. It is filtered, not sandboxed:
 
 - Only these command names are permitted: {allowed}
-- Only the first token is checked against that list, so pipes and redirection \
-inside a permitted command still run.
-- These are always refused, anywhere in the command line: {blocked}
+- The check applies to every command in the line, not just the first — each \
+stage of a pipe, and anything after `;`, `&&` or inside `$(...)`, must also be \
+on that list. A permitted command's *arguments* are unrestricted, so \
+`grep git README.md` is fine.
+- Backticks are refused. Use `$(...)` for command substitution.
+- If you need something not on the list, say so and let the operator run it \
+rather than guessing at a workaround.
 - Output is truncated at {MAX_OUTPUT_CHARS} characters. Narrow the command \
 rather than paging through a truncated dump.
+- A command that runs longer than {COMMAND_TIMEOUT_SECONDS} seconds is killed \
+and returns no output at all. Scope expensive searches to a directory rather \
+than starting from `/`.
 
 Do not attempt commands outside the permitted list — they fail and cost a turn. \
 If a task genuinely needs one, say so and let the operator run it."""
@@ -132,6 +143,20 @@ def build_system_prompt(
     return "\n\n".join(s for s in sections if s.strip())
 
 
+def build_configured_prompt() -> str:
+    """Build the prompt from the resolved configuration.
+
+    This is what the server boots with; call it instead of build_system_prompt()
+    unless you are deliberately overriding the configured identity.
+    """
+    return build_system_prompt(
+        AGENT_NAME,
+        AGENT_PERSONA,
+        extra_instructions=AGENT_INSTRUCTIONS,
+    )
+
+
 if __name__ == "__main__":
-    # `python -m agent.prompt` prints the prompt this machine would boot with.
-    sys.stdout.write(build_system_prompt("Kairo", "An AI assistant.") + "\n")
+    # `python -m agent.prompt` prints the prompt this machine would boot with,
+    # using the same config resolution the server does.
+    sys.stdout.write(build_configured_prompt() + "\n")

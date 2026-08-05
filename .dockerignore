@@ -9,6 +9,11 @@ data/
 scripts/
 .env
 *.log
+
+# Local config — may hold a real API key, and COPY . . would bake it into an
+# image layer. Configure the container through compose's environment: block,
+# which outranks the file anyway.
+config.json
 README.md
 LICENSE
 frontend/assets/background.jpg

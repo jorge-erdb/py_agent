@@ -35,7 +35,9 @@ async def lifespan(app):
 
     yield
 
-    # Close database connection on shutdown
+    # Release LLM clients first, then the database — persisting anything on the
+    # way out needs the DB still open.
+    await sm.shutdown()
     await db.close()
 
 # Serve the frontend at the root URL
