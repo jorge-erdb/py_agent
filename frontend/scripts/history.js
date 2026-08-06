@@ -1,14 +1,15 @@
 /**
  * Session history sidebar.
  *
- * /sessions returns only {id, created_at, last_active} — no title, no preview.
- * A list of truncated UUIDs is close to unusable, so previews are derived on the
- * client by reading each session's first user message. That costs one request
- * per session, so results are cached and refreshed lazily.
+ * /sessions returns {id, created_at, last_active, preview}, where `preview` is
+ * the session's first user message truncated server-side. The whole list
+ * therefore arrives in one request — no per-session fetching, and no cache to
+ * keep in step with the server.
  */
 
 import * as api from './api.js';
 import * as settings from './settings.js';
+import * as ui from './ui.js';
 
 const el = {
   panel: document.getElementById('history'),
@@ -17,9 +18,6 @@ const el = {
   closeBtn: document.getElementById('history-close'),
   scrim: document.getElementById('scrim'),
 };
-
-// sessionId -> preview string ('' means "loaded, but the session is empty")
-const previews = new Map();
 
 let activeId = null;
 let onSelect = null;
@@ -84,16 +82,6 @@ function dismiss() {
   else close();
 }
 
-/** Drop every cached preview — used when all sessions are destroyed. */
-export function clearPreviews() {
-  previews.clear();
-}
-
-/** Drop a cached preview so the next refresh re-reads it. */
-export function invalidatePreview(sessionId) {
-  previews.delete(sessionId);
-}
-
 /** Mark which session is current, without refetching the list. */
 export function setActive(sessionId) {
   activeId = sessionId;
@@ -121,7 +109,6 @@ export async function refresh() {
   }
 
   el.list.replaceChildren(...sessions.map(buildItem));
-  loadPreviews(sessions);
 }
 
 function renderNotice(text) {
@@ -132,6 +119,8 @@ function renderNotice(text) {
 }
 
 function buildItem(session) {
+  const preview = (session.preview || '').trim();
+
   const item = document.createElement('div');
   item.className = 'session';
   item.dataset.id = session.id;
@@ -145,7 +134,9 @@ function buildItem(session) {
 
   const title = document.createElement('span');
   title.className = 'session-title';
-  paintTitle(title, previews.get(session.id));
+  // A session with no user message yet still needs a label.
+  title.textContent = preview || 'Empty conversation';
+  title.classList.toggle('is-empty', !preview);
 
   const meta = document.createElement('span');
   meta.className = 'session-meta';
@@ -163,60 +154,11 @@ function buildItem(session) {
   del.textContent = '×';
   del.addEventListener('click', (event) => {
     event.stopPropagation();
-    remove(session.id);
+    remove(session.id, preview);
   });
 
   item.append(open, del);
   return item;
-}
-
-/**
- * Fill in previews for any session we have not read yet.
- *
- * Sequential rather than parallel: this is a local backend reading SQLite, and
- * a burst of concurrent full-history reads is a poor trade for a sidebar that
- * fills in over a few hundred milliseconds.
- */
-async function loadPreviews(sessions) {
-  for (const session of sessions) {
-    if (previews.has(session.id)) continue;
-
-    let text = '';
-    try {
-      const messages = await api.fetchSessionMessages(session.id);
-      const first = (messages || []).find((m) => m.role === 'user');
-      text = (first?.content || '').trim();
-    } catch (err) {
-      console.error('Could not preview session:', session.id, err);
-      continue; // leave it uncached so a later refresh retries
-    }
-
-    previews.set(session.id, text);
-    applyPreview(session.id, text);
-  }
-}
-
-function applyPreview(sessionId, text) {
-  const title = el.list.querySelector(`.session[data-id="${CSS.escape(sessionId)}"] .session-title`);
-  if (!title) return; // list re-rendered while we were fetching
-  paintTitle(title, text);
-}
-
-/**
- * Render a cached preview into a title element.
- *
- * The three states are distinct and easy to conflate: `undefined` means not
- * fetched yet, `''` means fetched and the session has no user message, and any
- * other string is the preview. In particular `''` must not be treated as
- * missing — that leaves the row blank on re-render, since the fetch pass skips
- * anything already cached.
- */
-function paintTitle(titleEl, cached) {
-  const pending = cached === undefined;
-
-  titleEl.textContent = pending ? '…' : cached || 'Empty conversation';
-  titleEl.classList.toggle('is-loading', pending);
-  titleEl.classList.toggle('is-empty', !pending && !cached);
 }
 
 // ── Actions ───────────────────────────────────────────────────────────
@@ -228,19 +170,26 @@ async function select(sessionId) {
   close();
 }
 
-async function remove(sessionId) {
-  const label = previews.get(sessionId) || sessionId.slice(0, 8);
-  if (!confirm(`Delete this conversation permanently?\n\n${label}`)) return;
+async function remove(sessionId, preview) {
+  const label = preview || sessionId.slice(0, 8);
+
+  const confirmed = await ui.confirmAction({
+    title: 'Delete this conversation?',
+    body: `${label}\n\nThis cannot be undone.`,
+    confirmLabel: 'Delete',
+  });
+  if (!confirmed) return;
 
   try {
     await api.destroySession(sessionId);
   } catch (err) {
     console.error('Could not delete session:', err);
-    alert(`Could not delete: ${err.message}`);
+    ui.appendMessage({
+      role: 'system',
+      content: `Could not delete that conversation: ${err.message}`,
+    });
     return;
   }
-
-  previews.delete(sessionId);
 
   // Deleting the conversation you are looking at leaves the chat pointing at
   // something that no longer exists — hand control back to the app to start a

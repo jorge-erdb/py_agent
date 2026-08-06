@@ -98,8 +98,13 @@ async function switchToSession(id) {
   try {
     const messages = await api.fetchSessionMessages(id);
     if (messages === null) {
-      // Deleted from under us — the list is stale.
-      ui.appendMessage({ role: 'system', content: 'That conversation no longer exists.' });
+      // Deleted from under us — the list is stale. The notice lands in the
+      // conversation still on screen, which is *not* the one that vanished, so
+      // it has to say which is which.
+      ui.appendMessage({
+        role: 'system',
+        content: 'Could not open that conversation — it no longer exists. You are still in this one.',
+      });
       history.refresh();
       return;
     }
@@ -126,7 +131,14 @@ async function send(text) {
       if (msg._final) break;
 
       ui.appendMessage(msg);
-      ui.setBusy(true, msg.role === 'tool' ? 'Thinking…' : 'Running tools…');
+
+      // The label describes what happens *next*, not what just arrived. A tool
+      // result hands control back to the model; an assistant turn carrying
+      // tool_calls means those tools run now. A plain assistant message is the
+      // final answer — _final follows immediately, so leave the label as it is
+      // rather than flashing "Running tools…" over the end of the turn.
+      if (msg.role === 'tool') ui.setBusy(true, 'Thinking…');
+      else if (msg.tool_calls?.length) ui.setBusy(true, 'Running tools…');
     }
   } catch (err) {
     // An abort is the user pressing Stop — already acknowledged in the log.
@@ -139,8 +151,8 @@ async function send(text) {
     ui.scrollToBottom();
 
     // This turn changed the session's last_active, and if it was the first
-    // message it also gave the session its preview text.
-    history.invalidatePreview(sessionId);
+    // message it also gave the session its preview text. Both come down with
+    // the list itself, so a plain refresh picks them up.
     history.refresh();
   }
 }
@@ -181,9 +193,22 @@ document.getElementById('clear-btn').addEventListener('click', async () => {
   if (!sessionId) return ui.clearLog();
 
   try {
-    await api.clearHistory(sessionId);
+    const { success } = await api.clearHistory(sessionId);
+
+    if (!success) {
+      // The backend only reports false when the session exists nowhere — a
+      // stale id, or it was destroyed in another tab. Emptying the log here
+      // would show a convincingly blank conversation that was never cleared.
+      resetToNewSession();
+      ui.appendMessage({
+        role: 'system',
+        content: 'That conversation no longer exists on the server. Started a new one.',
+      });
+      history.refresh();
+      return;
+    }
+
     ui.clearLog();
-    history.invalidatePreview(sessionId);
     history.refresh();
   } catch (err) {
     console.error('Could not clear history:', err);
@@ -213,7 +238,6 @@ settings.init({
     api.abort();
     ui.setBusy(false);
     resetToNewSession();
-    history.clearPreviews();
     await history.refresh();
   },
 });

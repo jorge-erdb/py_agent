@@ -6,6 +6,11 @@ from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# How much of a session's first user message to return as its sidebar title.
+# Generous — the sidebar truncates visually — but bounded so a pasted wall of
+# text does not travel with every session list.
+PREVIEW_CHARS = 120
+
 
 class DatabaseManager:
     def __init__(self, db_path: str):
@@ -51,6 +56,14 @@ class DatabaseManager:
                 timestamp REAL NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions (id)
             )
+        """)
+
+        # Every message query filters by session_id and orders by
+        # (timestamp, id) — history replay, the messages endpoint, and the
+        # preview subquery above. Without this each is a full table scan.
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_messages_session
+                ON messages (session_id, timestamp, id)
         """)
 
         await db.commit()
@@ -158,11 +171,29 @@ class DatabaseManager:
             return False
 
     async def get_all_sessions(self) -> List[Dict[str, Any]]:
-        """Retrieve all sessions with their timestamps."""
+        """Retrieve all sessions with their timestamps and a title preview.
+
+        The preview is the session's first user message, truncated. It is
+        computed here, in one query, because the alternative the sidebar used
+        was a full `/sessions/{id}/messages` request per session — which now
+        carries every tool result at up to MAX_OUTPUT_CHARS each, i.e. megabytes
+        fetched and discarded to render a handful of one-line titles.
+
+        `preview` is None for a session with no user message yet.
+        """
         try:
             db = await self._get_db()
             async with db.execute(
-                "SELECT id, created_at, last_active FROM sessions ORDER BY last_active DESC"
+                f"""
+                SELECT s.id, s.created_at, s.last_active,
+                       (SELECT substr(m.content, 1, {PREVIEW_CHARS})
+                          FROM messages m
+                         WHERE m.session_id = s.id AND m.message_type = 'user'
+                         ORDER BY m.timestamp ASC, m.id ASC
+                         LIMIT 1) AS preview
+                  FROM sessions s
+                 ORDER BY s.last_active DESC
+                """
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [
@@ -170,6 +201,7 @@ class DatabaseManager:
                         "id": row["id"],
                         "created_at": row["created_at"],
                         "last_active": row["last_active"],
+                        "preview": row["preview"],
                     }
                     for row in rows
                 ]

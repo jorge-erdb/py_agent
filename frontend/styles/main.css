@@ -263,7 +263,6 @@ body {
   text-overflow: ellipsis;
 }
 
-.session-title.is-loading,
 .session-title.is-empty {
   color: var(--text-dim);
   font-style: italic;
@@ -700,6 +699,44 @@ body {
 
 .composer-buttons {
   display: flex;
+  gap: 8px;
+}
+
+/* ── Confirmation dialog ─────────────────────────────────────────────── */
+
+.confirm {
+  width: min(380px, calc(100vw - 32px));
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
+}
+
+.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.confirm-body {
+  margin: 0 0 20px;
+  font-size: 13px;
+  color: var(--text-dim);
+  /* The caller passes a preview and a warning separated by blank lines, and a
+     preview is arbitrary user text that can be long. */
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
   gap: 8px;
 }
 

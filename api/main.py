@@ -442,10 +442,11 @@ class SessionManager:
         # but weren't loaded (e.g., after a crash where in-memory state was lost)
         if self.db:
             return await self.db.get_all_sessions()
-        # Fallback to in-memory only
+        # Fallback to in-memory only. No preview is available without the DB —
+        # the shape stays the same so the frontend needs no special case.
         result = []
         for sid, ts in self.session_timestamps.items():
-            result.append({"id": sid, "last_active": ts})
+            result.append({"id": sid, "last_active": ts, "preview": None})
         return result
 
 
@@ -473,6 +474,26 @@ class ClearRequest(BaseModel):
 # ── Session manager instance (wired up in main.py lifespan) ───────────
 
 session_manager: Optional[SessionManager] = None
+
+
+async def _persist_turn(session_id: str, agent: Agent) -> None:
+    """Write a finished turn to SQLite, surviving a client disconnect.
+
+    A disconnect tears this generator down mid-await, which would cancel an
+    ordinary `await` on the write along with it. `shield` lets the write run to
+    completion regardless. Waiting on it explicitly afterwards matters just as
+    much: it keeps the caller — and therefore the per-session lock it is holding
+    — from unwinding before the rows land, so a fast follow-up request cannot
+    start a turn that races this one's bookkeeping.
+    """
+    writer = asyncio.create_task(
+        session_manager.persist_new_messages(session_id, agent)
+    )
+    try:
+        await asyncio.shield(writer)
+    except asyncio.CancelledError:
+        await asyncio.wait({writer})
+        raise
 
 
 # ── API Routes ─────────────────────────────────────────────────────────
@@ -534,11 +555,25 @@ async def chat_stream(request: ChatRequest):
                 async for msg in agent.process_messages(new_messages):
                     yield json.dumps(msg) + "\n"
             except asyncio.CancelledError:
-                logger.info("Stream cancelled for session %s", session_id[:8])
-                raise  # Re-raise to avoid partial history save
-
-        # Persist only what this turn added — see persist_new_messages().
-        await session_manager.persist_new_messages(session_id, agent)
+                # Stop, or the browser going away. Everything this turn produced
+                # is already on the user's screen, so discarding it would make
+                # Stop look like it silently threw the work away.
+                #
+                # It cannot be saved as-is, though: a stream cut between an
+                # assistant tool_calls message and its results leaves history in
+                # a state the API refuses. Trim back to the last complete turn,
+                # then save that — in memory as well as on disk, or the live
+                # session keeps the invalid tail and fails on its next turn.
+                removed = agent.trim_incomplete_tail()
+                logger.info(
+                    "Stream cancelled for session %s — keeping %d entries, dropped %d incomplete",
+                    session_id[:8], len(agent.history) - 1, removed,
+                )
+                raise
+            finally:
+                # Runs on the cancellation path too, before the exception
+                # propagates — see _persist_turn().
+                await _persist_turn(session_id, agent)
 
     return StreamingResponse(
         event_generator(),

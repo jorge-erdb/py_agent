@@ -44,7 +44,9 @@
     </div>
 
     <div class="topbar-actions">
-      <span id="conn" class="conn" data-state="unknown" title="Backend status">offline</span>
+      <!-- Neutral until the first health poll answers; "offline" here would
+           accuse the backend of being down on every single page load. -->
+      <span id="conn" class="conn" data-state="unknown" title="Backend status">checking…</span>
       <button id="new-btn" class="btn btn-ghost" title="Start a fresh conversation">New</button>
       <button id="clear-btn" class="btn btn-ghost" title="Clear this conversation's history">Clear</button>
       <button id="settings-btn" class="icon-btn" type="button" aria-label="Settings" title="Settings">⚙</button>
@@ -137,6 +139,15 @@
       <p class="danger-result" id="danger-result" aria-live="polite"></p>
     </section>
 
+  </div>
+</dialog>
+
+<dialog class="confirm" id="confirm" aria-labelledby="confirm-title">
+  <h2 class="confirm-title" id="confirm-title">Are you sure?</h2>
+  <p class="confirm-body" id="confirm-body"></p>
+  <div class="confirm-actions">
+    <button type="button" id="confirm-cancel" class="btn btn-ghost">Cancel</button>
+    <button type="button" id="confirm-ok" class="btn btn-danger">Delete</button>
   </div>
 </dialog>
 

@@ -26,6 +26,67 @@ const el = {
 
 export { el };
 
+const confirmEl = {
+  dialog: document.getElementById('confirm'),
+  title: document.getElementById('confirm-title'),
+  body: document.getElementById('confirm-body'),
+  ok: document.getElementById('confirm-ok'),
+  cancel: document.getElementById('confirm-cancel'),
+};
+
+// ── Confirmation ──────────────────────────────────────────────────────
+
+/**
+ * Ask the user to confirm a destructive action.
+ *
+ * Replaces window.confirm(), which cannot be styled, blocks the event loop, and
+ * looked nothing like the typed-DELETE confirmation the settings dialog already
+ * uses for the same class of action.
+ *
+ * Cancel is focused on open and Escape resolves false, so the safe answer is
+ * always the default one.
+ *
+ * @returns {Promise<boolean>} whether the user confirmed
+ */
+export function confirmAction({ title, body = '', confirmLabel = 'Delete' }) {
+  const dialog = confirmEl.dialog;
+
+  confirmEl.title.textContent = title;
+  confirmEl.body.textContent = body;
+  confirmEl.ok.textContent = confirmLabel;
+
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) return; // `close` fires after a button too
+      settled = true;
+
+      confirmEl.ok.removeEventListener('click', onOk);
+      confirmEl.cancel.removeEventListener('click', onCancel);
+      dialog.removeEventListener('close', onCancel);
+      dialog.removeEventListener('click', onBackdrop);
+
+      if (dialog.open) dialog.close();
+      resolve(result);
+    };
+
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false); // also the Escape path, via `close`
+    const onBackdrop = (event) => {
+      if (event.target === dialog) finish(false);
+    };
+
+    confirmEl.ok.addEventListener('click', onOk);
+    confirmEl.cancel.addEventListener('click', onCancel);
+    dialog.addEventListener('close', onCancel);
+    dialog.addEventListener('click', onBackdrop);
+
+    dialog.showModal();
+    confirmEl.cancel.focus();
+  });
+}
+
 // ── Markdown ──────────────────────────────────────────────────────────
 
 if (window.marked) {
@@ -185,7 +246,23 @@ export function setBusy(busy, text = 'Working…') {
   el.stopBtn.hidden = !busy;
   el.input.disabled = busy;
 
-  if (!busy) el.input.focus();
+  if (!busy && canTakeFocus()) el.input.focus();
+}
+
+/**
+ * Whether returning focus to the composer would steal it from somewhere.
+ *
+ * A turn can finish at any moment, including while the settings dialog is open
+ * or the user is tabbing the sidebar. Focusing unconditionally yanks them out
+ * of whatever they were doing — and out of a modal, which is worse than merely
+ * rude for keyboard and screen-reader users.
+ *
+ * Disabling the textarea during a turn also blurs it, so after a normal send
+ * the active element is <body> and this returns true.
+ */
+function canTakeFocus() {
+  const active = document.activeElement;
+  return !active || active === document.body || active === el.input;
 }
 
 export function setConnection(online) {

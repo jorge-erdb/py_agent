@@ -27,13 +27,15 @@ logger = logging.getLogger(__name__)
 COMMAND_WHITELIST = [
     # Inspecting files and directories
     "cat", "find", "ls", "head", "tail", "stat", "file", "tree", "du", "df",
-    "wc", "diff", "cmp", "comm", "realpath", "basename", "dirname",
+    "wc", "diff", "cmp", "comm", "realpath", "basename", "dirname", "touch",
+    "mkdir",
     # Searching and transforming text
     "grep", "rg", "sed", "awk", "sort", "uniq", "cut", "tr", "tac", "rev",
     "nl", "column", "paste", "fold", "jq",
     # Shell and environment basics
-    "pwd", "echo", "printf", "which", "env", "date", "seq",
-    "uname", "whoami", "id", "hostname", "ps",
+    "pwd", "echo", "printf", "which", "env", "date", "seq", "uname",
+    "whoami", "id", "hostname", "ps", "sleep", "ps", "pgrep", "sleep",
+    "kill", "source",
     # Checksums
     "md5sum", "sha256sum",
     # Interpreters and network. These can do anything the account can do;
@@ -124,7 +126,7 @@ def _is_allowed(command: str) -> tuple[bool, str]:
 
     for name in names:
         if name not in COMMAND_WHITELIST:
-            return False, f"'{name}' command blocked."
+            return False, f"'{name}' command blocked. Ask the user to execute."
 
     return True, ""
 

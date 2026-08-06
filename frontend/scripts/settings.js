@@ -1,6 +1,6 @@
 /**
  * UI preferences, stored in localStorage. Nothing here touches backend config —
- * the model and base_url come from env / ~/.config/py_agent/config.json and are
+ * the model and base_url come from env / config.json at the repo root and are
  * read once at process start, so they are not the frontend's to change.
  *
  * This module must not import ui.js: ui.js reads preferences from here, and a

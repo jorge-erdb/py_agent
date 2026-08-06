@@ -54,6 +54,42 @@ class Agent:
         """Registers a tool for the agent to use."""
         self.tools[tool.name] = tool
 
+    def trim_incomplete_tail(self) -> int:
+        """Drop a trailing tool-calling turn whose results never arrived.
+
+        A cancelled stream can leave history ending at an assistant message that
+        requested tools, with only some — or none — of the matching `tool`
+        replies. That history is not just incomplete, it is *invalid*: an
+        assistant `tool_calls` message must be followed by a reply carrying each
+        `tool_call_id`, and the API rejects the request outright otherwise. Left
+        in place it breaks every subsequent turn on the session, and breaks them
+        permanently once persisted.
+
+        Only the most recent tool-calling turn can be incomplete, so this stops
+        at the first one it finds walking backwards.
+
+        Returns the number of entries removed.
+        """
+        for i in range(len(self.history) - 1, -1, -1):
+            msg = self.history[i]
+            if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+                continue
+
+            expected = {tc.get("id") for tc in msg["tool_calls"]}
+            answered = {
+                m.get("tool_call_id")
+                for m in self.history[i + 1:]
+                if m.get("role") == "tool"
+            }
+            if expected <= answered:
+                return 0  # complete — nothing to trim
+
+            removed = len(self.history) - i
+            del self.history[i:]
+            return removed
+
+        return 0
+
     async def _get_tool_definitions(self):
         """Converts registered tools to OpenAI tool format."""
         if not self.tools:
