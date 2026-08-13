@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import config
 from agent.core import Agent, Tool
 from agent.prompt import AGENT_NAME, AGENT_PERSONA, build_configured_prompt
-from agent.tools import run_shell_command
+from agent.tools import read_file, run_shell_command, write_file
 from database.db import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,32 @@ class SessionManager:
                 "required": ["command"],
             }
         )
+        self._read_file_tool = Tool(
+            name="read_file",
+            description="Reads a text file and returns its contents. Binary files are rejected.",
+            func=read_file,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The file path to read."}
+                },
+                "required": ["path"],
+            }
+        )
+
+        self._write_file_tool = Tool(
+            name="write_file",
+            description="Writes text content to a file atomically. Creates parent directories if needed.",
+            func=write_file,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "The file path to write."},
+                    "content": {"type": "string", "description": "The text content to write."}
+                },
+                "required": ["path", "content"],
+            }
+        )
 
     # ── Helpers ────────────────────────────────────────────────────────
 
@@ -131,6 +157,8 @@ class SessionManager:
             system_prompt=SYSTEM_PROMPT,
         )
         agent.register_tool(self._tool)
+        agent.register_tool(self._read_file_tool)
+        agent.register_tool(self._write_file_tool)
         return agent
 
     async def _unload_idle(self, exclude: Optional[str] = None) -> int:

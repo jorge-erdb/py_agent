@@ -1,63 +1,15 @@
 import asyncio
 import logging
 import os
-import re
-import shlex
+from pathlib import Path
 import signal
 
 import config
 
 logger = logging.getLogger(__name__)
 
-# ----------------------------------------------------------------------
-# Allowed command names, checked at every *command position* in the line —
-# the first word, and anything the shell will execute after `|`, `;`, `&&`,
-# `$( )` and friends. See _command_positions().
-#
-# There is no blacklist. A blacklist has to match the raw text, which cannot
-# tell an executed word from a piece of data: `\brm\b` refuses `cat rm.txt`
-# and `grep git README.md` while doing nothing about
-# `python3 -c "shutil.rmtree(...)"`. Denying by position instead of by
-# spelling costs no capability and misfires on nothing.
-#
-# This is a guardrail against model error, not a security control. `python3`
-# and `sqlite3` alone make it fully bypassable, deliberately — the operator's
-# containment is the boundary. See SECURITY.md.
-# ----------------------------------------------------------------------
-COMMAND_WHITELIST = [
-    # Inspecting files and directories
-    "cat", "find", "ls", "head", "tail", "stat", "file", "tree", "du", "df",
-    "wc", "diff", "cmp", "comm", "realpath", "basename", "dirname", "touch",
-    "mkdir",
-    # Searching and transforming text
-    "grep", "rg", "sed", "awk", "sort", "uniq", "cut", "tr", "tac", "rev",
-    "nl", "column", "paste", "fold", "jq",
-    # Shell and environment basics
-    "pwd", "echo", "printf", "which", "env", "date", "seq", "uname",
-    "whoami", "id", "hostname", "ps", "sleep", "ps", "pgrep", "sleep",
-    "kill", "source",
-    # Checksums
-    "md5sum", "sha256sum",
-    # Interpreters and network. These can do anything the account can do;
-    # they are here because they are genuinely useful, not because they
-    # are safe.
-    "python3", "sqlite3", "curl", "wget",
-]
-
-# Tokens after which the shell starts a *new* command. Redirection operators
-# (`>`, `>>`, `<`, `&>`, `<<<`) are deliberately absent: what follows them is a
-# filename, and treating `out.txt` in `echo hi > out.txt` as a command name
-# would reject every redirect.
-COMMAND_SEPARATORS = frozenset({
-    "|", "||", "|&", "&&", ";", ";;", "&", "(", ")", "{", "}", "!", "\n",
-})
-
-# `FOO=bar cmd ...` — assignments precede the command name at a command
-# position, so they are stepped over rather than mistaken for the command.
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
 # Maximum length of output that will be returned to the caller.
-MAX_OUTPUT_CHARS = 6000
+MAX_OUTPUT_CHARS = 24000
 
 # Wall-clock limit for a single command. The agent holds its per-session lock
 # for the whole of a turn, so a command that never returns — `curl` against a
@@ -66,69 +18,6 @@ MAX_OUTPUT_CHARS = 6000
 COMMAND_TIMEOUT_SECONDS = config.get(
     "tools", "command_timeout", "COMMAND_TIMEOUT", 300, cast=int
 )
-
-def _command_positions(tokens: list[str]) -> list[str]:
-    """Return the tokens the shell will treat as command names.
-
-    That is the first word, plus whatever follows a separator in
-    COMMAND_SEPARATORS. Everything else is data — arguments, redirect targets,
-    search patterns — and is not a command no matter what it spells.
-    """
-    names: list[str] = []
-    expect_command = True
-
-    for token in tokens:
-        if token in COMMAND_SEPARATORS:
-            expect_command = True
-            continue
-
-        if not expect_command:
-            continue
-
-        # `$` is left as its own token by the lexer in `$(cmd)`; the real
-        # command name is past the `(` that follows it.
-        if token == "$" or _ASSIGNMENT.match(token):
-            continue
-
-        names.append(token)
-        expect_command = False
-
-    return names
-
-
-def _is_allowed(command: str) -> tuple[bool, str]:
-    """
-    Return (True, '') if the command is allowed, otherwise (False, error_msg).
-
-    Every command position must name something in COMMAND_WHITELIST, so
-    `ls | rm -rf /` is refused on `rm` even though `ls` opens the line, while
-    `grep git README.md` runs — `git` there is a search string, not a command.
-    """
-    if not command or not command.strip():
-        return False, "Empty command."
-
-    # Backticks are the one construct the lexer will not break apart: it
-    # yields "`rm" as a single token, hiding the command inside it. `$(...)`
-    # is the modern spelling and tokenizes correctly, so nothing is lost.
-    if "`" in command:
-        return False, "Backticks are not supported — use $(...) instead."
-
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        return False, "Invalid command syntax."
-
-    names = _command_positions(tokens)
-    if not names:
-        return False, "No command found."
-
-    for name in names:
-        if name not in COMMAND_WHITELIST:
-            return False, f"'{name}' command blocked. Ask the user to execute."
-
-    return True, ""
 
 async def _kill_process_group(process: asyncio.subprocess.Process) -> None:
     """Kill a timed-out command and everything it spawned.
@@ -166,23 +55,13 @@ async def run_shell_command(command: str) -> str:
     """
     Executes a shell command and returns the output.
 
-    Whitelisted commands are allowed; a simple blacklist refuses patterns such
-    as `rm` and `sudo`. Commands are killed after COMMAND_TIMEOUT_SECONDS and
-    output is truncated at MAX_OUTPUT_CHARS.
-
-    None of that is a sandbox. Only the first token is checked against the
-    whitelist, so anything reachable through a permitted command still runs.
-    The container is the actual boundary — see SECURITY.md.
+    Commands are killed after COMMAND_TIMEOUT_SECONDS and output is truncated
+    at MAX_OUTPUT_CHARS. There is no sandbox — only container/process-level
+    containment provides security. See SECURITY.md.
     """
     if not command or not command.strip():
         logger.warning("Empty command received")
         return "Error: Empty command."
-
-    allowed, msg = _is_allowed(command)
-    if not allowed:
-        logger.warning("Command blocked: %s", msg)
-        # The “graceful” message now contains the actual reason
-        return f"Error: {msg}"
 
     try:
         logger.info("Executing command: %s", command)
@@ -237,4 +116,145 @@ async def run_shell_command(command: str) -> str:
             result = result[:MAX_OUTPUT_CHARS] + truncate_msg
         return result
 
-# async def [read tool using 'cat -n']
+
+async def read_file(path: str) -> str:
+    """Read a text file and return its contents.
+
+    Uses Python's built-in open() — no shell execution, no subprocess.
+
+    Binary files are detected by scanning the first 8 KiB for null bytes
+    and rejected outright. Output is truncated at MAX_OUTPUT_CHARS.
+
+    Args:
+        path: Absolute or relative file path to read.
+
+    Returns:
+        File contents as a string, or an error message on failure.
+    """
+    if not path or not path.strip():
+        logger.warning("Empty file path received")
+        return "Error: Empty path."
+
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError) as e:
+        logger.warning("Cannot resolve path %r: %s", path, e)
+        return f"Error: cannot resolve path — {e}"
+
+    # --- existence / type checks (fast, no content read) ---
+    try:
+        if not resolved.exists():
+            return f"Error: file not found — {resolved}"
+        if resolved.is_dir():
+            return f"Error: path is a directory — {resolved}"
+    except OSError as e:
+        logger.warning("Cannot stat %r: %s", resolved, e)
+        return f"Error: cannot access path — {e}"
+
+    # --- binary detection on the first 8 KiB ---
+    try:
+        with open(resolved, "rb") as fh:
+            header = fh.read(8192)
+    except PermissionError:
+        return f"Error: permission denied — {resolved}"
+    except OSError as e:
+        logger.warning("Cannot read %r: %s", resolved, e)
+        return f"Error: cannot read file — {e}"
+
+    if b"\x00" in header:
+        # Check the rest of the file too for a more accurate report
+        try:
+            size = resolved.stat().st_size
+            return (
+                f"Error: binary file detected — {resolved} "
+                f"({size:,} bytes). Use run_shell_command to inspect it."
+            )
+        except OSError:
+            return f"Error: binary file detected — {resolved}"
+
+    # --- read full text ---
+    try:
+        with open(resolved, encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+    except PermissionError:
+        return f"Error: permission denied — {resolved}"
+    except OSError as e:
+        logger.warning("Cannot read %r: %s", resolved, e)
+        return f"Error: cannot read file — {e}"
+
+    result = content.rstrip("\n") or "File is empty."
+    logger.info("Read %d chars from %s", len(content), resolved)
+
+    # Truncate if needed.
+    if len(result) > MAX_OUTPUT_CHARS:
+        omitted = len(result) - MAX_OUTPUT_CHARS
+        result = (
+            result[:MAX_OUTPUT_CHARS]
+            + f"\n... [truncated, {omitted:,} chars omitted — "
+            f"use run_shell_command with head/tail/sed to explore portions]"
+        )
+
+    return result
+
+
+async def write_file(path: str, content: str) -> str:
+    """Write text content to a file atomically.
+
+    Uses a temp file in the same directory followed by os.replace() so an
+    interrupted write never corrupts the target.  Parent directories are
+    created automatically.
+
+    Args:
+        path:   Absolute or relative file path to write.
+        content: Text content to write.
+
+    Returns:
+        A confirmation message with resolved path and byte count, or an
+        error string on failure.
+    """
+    if not path or not path.strip():
+        logger.warning("Empty file path received")
+        return "Error: Empty path."
+
+    if content is None:
+        logger.warning("None content received for write_file")
+        return "Error: content must be a string."
+
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, ValueError) as e:
+        logger.warning("Cannot resolve path %r: %s", path, e)
+        return f"Error: cannot resolve path — {e}"
+
+    # --- ensure parent directory exists ---
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.warning("Cannot create parent dir for %r: %s", resolved, e)
+        return f"Error: cannot create parent directory — {e}"
+
+    # --- write atomically via temp file + rename ---
+    tmp_path = resolved.with_suffix(resolved.suffix + ".tmp")
+
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(str(tmp_path), str(resolved))
+    except PermissionError:
+        # Clean up the temp file so it doesn't linger.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return f"Error: permission denied — {resolved}"
+    except OSError as e:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.warning("Cannot write %r: %s", resolved, e)
+        return f"Error: cannot write file — {e}"
+
+    byte_count = len(content.encode("utf-8"))
+    logger.info("Wrote %d bytes to %s", byte_count, resolved)
+    return f"Successfully wrote {byte_count:,} bytes to {resolved}"

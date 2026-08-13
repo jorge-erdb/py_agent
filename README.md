@@ -6,8 +6,9 @@ A Python-based AI agent with a web interface that can reason, call tools, and ex
 
 - **Reasoning-loop agent** — The agent iteratively calls the LLM, executes tool outputs, and loops until a final answer is produced.
 - **Tool-based architecture** — Register arbitrary functions as tools with metadata (name, description, parameters). Both sync and async functions are supported.
-- **Shell command execution** — A built-in `run_shell_command` tool runs commands through a shell, gated by a command-name whitelist and a pattern blacklist. See [Security](#security).
-- **Session management** — Per-session agent instances, persisted to SQLite and restored on restart. Sessions are kept indefinitely and are never expired: the database is meant to be a durable record the agent can search and return to, so an inactivity timeout would defeat its purpose. Prune deliberately via `POST /sessions/{id}` or `POST /destroy_all`.
+- **Shell command execution** — A built-in `run_shell_command` tool runs commands through a shell with no whitelist — the container provides containment. See [Security](#security).
+- **File I/O tools** — `read_file` reads text files (rejects binary), `write_file` writes atomically via temp file + rename, auto-creating parent directories.
+- **Session management** — Per-session agent instances persisted to SQLite and restored on restart. Idle sessions are unloaded from memory after a configurable TTL (`sessions.idle_ttl`, default 30 min) to reclaim LLM client connection pools; the data stays in SQLite and is rebuilt on next access. Prune deliberately via `DELETE /sessions/{id}` or `POST /destroy_all`.
 - **Streaming responses** — Messages and tool results stream to the UI as NDJSON while the reasoning loop runs.
 - **Web UI** — A chat interface with markdown rendering, collapsible tool outputs, and abort support. A sidebar lists past conversations with previews derived client-side; a settings dialog covers light/dark/system theming, tool-block defaults, and a custom log background stored in IndexedDB.
 
@@ -15,7 +16,7 @@ A Python-based AI agent with a web interface that can reason, call tools, and ex
 
 | Layer | Technology |
 |-------|------------|
-| Backend | Python 3.12+ · FastAPI · Uvicorn |
+| Backend | Python 3.14+ · FastAPI · Uvicorn |
 | Persistence | SQLite via aiosqlite |
 | LLM Client | OpenAI SDK (compatible with any OpenAI-API server) |
 | Frontend | Vanilla JS (ES modules) · Marked.js · DOMPurify — both vendored, no CDN |
@@ -23,7 +24,7 @@ A Python-based AI agent with a web interface that can reason, call tools, and ex
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.14+
 - An OpenAI-compatible LLM server running on `http://localhost:8080` (e.g., [llama.cpp](https://github.com/ggerganov/llama.cpp), [Ollama](https://ollama.com), or similar)
 
 ## Installation
@@ -83,6 +84,7 @@ OpenRouter, Groq, and Together.
 | `AGENT_INSTRUCTIONS` | `agent.instructions` | _(empty)_ | Free-form text appended after the built-in prompt sections, so it can override them |
 | `SERVER_HOST` | `server.host` | `0.0.0.0` | Host to bind the server |
 | `SERVER_PORT` | `server.port` | `8000` | Port to bind the server |
+| `SESSION_IDLE_TTL` | `sessions.idle_ttl` | `1800` | Seconds of inactivity before a session is unloaded from memory (set to `0` to keep all sessions resident) |
 
 The system prompt is assembled once at process start from `agent.name`,
 `agent.persona`, `agent.instructions` and built-in environment/shell-policy
@@ -156,7 +158,7 @@ py_agent/
 ├── agent/                   # Agent core logic
 │   ├── core.py              # Tool class + Agent with reasoning loop
 │   ├── prompt.py            # System prompt assembly (runnable: python -m agent.prompt)
-│   └── tools.py             # Shell tool + whitelist/blacklist gate
+│   └── tools.py             # Shell, read_file, and write_file tools
 │
 ├── api/                     # FastAPI backend
 │   └── main.py              # REST API + session management
@@ -189,13 +191,10 @@ py_agent/
 | `POST` | `/new-session` | Create an empty session, return its id |
 | `GET` | `/sessions` | List all sessions, newest first |
 | `GET` | `/sessions/{id}/messages` | Full stored message list for one session |
-| `POST` | `/sessions/{id}` | **Destroy** that session and its messages |
+| `DELETE` | `/sessions/{session_id}` | **Destroy** that session and its messages |
 | `POST` | `/clear` | Clear one session's messages, keep the session |
 | `POST` | `/destroy_all` | Destroy every session and message |
 | `GET` | `/health` | Liveness probe |
-
-Note the verb on `POST /sessions/{id}`: destroying a session is a POST, not a
-DELETE.
 
 Start the app with `python main.py` — that is where the lifespan hook and the
 static mount are wired up.
@@ -260,12 +259,8 @@ This project lets a language model run shell commands on the machine hosting it.
 **[SECURITY.md](SECURITY.md) is the authoritative document** — read it before
 exposing the agent to anything you care about. In brief:
 
-- `agent/tools.py` gates commands through a whitelist and blacklist. This is a
-  guardrail against model error, **not a security boundary** — commands run through
-  a full shell, and whitelisted interpreters like `python3` can do anything.
-- There is **no sandbox**, no timeout, and no resource limit. Containing the agent
-  is your decision; the [Docker setup](#running-with-docker) is one reasonable way.
-- There is **no authentication** on any endpoint, and CORS is `*`.
+- `agent/tools.py` has **no whitelist** — any command available in the environment can be executed. The container provides containment; there is no sandbox, no timeout on individual commands, and no resource limit at the tool level. See [Docker setup](#running-with-docker) for a reasonable containment strategy.
+- There is **no authentication** on any endpoint, and CORS is `*` when enabled.
 - Prompt injection is possible and cannot be prevented. Don't point the agent at
   content you don't trust.
 - `POST /destroy_all` **irreversibly** deletes all history, and the endpoint is

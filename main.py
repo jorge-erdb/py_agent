@@ -13,12 +13,11 @@ logging.basicConfig(
 )
 
 from fastapi.staticfiles import StaticFiles  # noqa: E402
-import api.main  # noqa: E402
 from api.main import app, SessionManager  # noqa: E402
 from database.db import DatabaseManager  # noqa: E402
 
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app_obj):
     # Initialize database
     db_dir = Path(__file__).parent / "data"
     db_dir.mkdir(exist_ok=True)
@@ -27,8 +26,9 @@ async def lifespan(app):
     await db.initialize()
 
     # Create session manager with database and wire it into api.main
-    api.main.session_manager = SessionManager(db=db)
-    sm = api.main.session_manager
+    from api import main as api_main
+    api_main.session_manager = SessionManager(db=db)
+    sm = api_main.session_manager
 
     # Load existing sessions from database
     await sm.load_sessions()

@@ -10,14 +10,12 @@ section simply drops out rather than leaving a stray heading behind.
 """
 
 import platform
-import re
 import sys
 from pathlib import Path
 
 import config
 from agent.tools import (
     COMMAND_TIMEOUT_SECONDS,
-    COMMAND_WHITELIST,
     MAX_OUTPUT_CHARS,
 )
 
@@ -63,34 +61,52 @@ def _environment() -> str:
     return "# Environment\n\n" + "\n".join(facts)
 
 
-def _shell_policy() -> str:
-    """The run_shell_command rules.
+def _file_reading_policy() -> str:
+    """The read_file tool description."""
+    return f"""# File reading
 
-    The tool's JSON schema tells the model the tool exists; it does not tell it
-    which commands will actually survive the whitelist. Without this the model
-    burns turns discovering that `rm` and `git` are refused.
-    """
-    allowed = ", ".join(f"`{c}`" for c in COMMAND_WHITELIST)
+    You have a dedicated tool, `read_file`, for reading text files. It uses Python's
+    built-in open() — no shell execution involved.
+
+    - Takes a file path (absolute or relative) and returns the full contents.
+    - Binary files are detected and rejected with an error message.
+    - Output is truncated at {MAX_OUTPUT_CHARS} characters. When truncated, use `run_shell_command` with `head`, `tail`, or `sed` to explore portions of large files.
+    - Empty files return "File is empty."
+
+    Example: read_file(path="README.md")"""
+
+
+def _write_file_policy() -> str:
+    """The write_file tool description."""
+    return f"""# File writing
+
+    You have a tool, `write_file`, for writing text files.
+
+    - Takes a file path and content string. Creates parent directories automatically if needed.
+    - Uses atomic writes (temp file + rename) to avoid corruption during interrupted writes.
+    - Binary detection is NOT performed — you are responsible for ensuring the content is valid text.
+    - Returns a confirmation with resolved path and byte count, or an error on failure.
+
+    Example: write_file(path="output.txt", content="Hello world")"""
+
+
+def _shell_policy() -> str:
+    """The run_shell_command rules."""
     return f"""# Shell access
 
-You have one tool, `run_shell_command`. It is filtered, not sandboxed:
+    You have one tool, `run_shell_command`. It executes any command available in
+    the environment directly — there is no whitelist. The container is the actual
+    boundary — see SECURITY.md.
 
-- Only these command names are permitted: {allowed}
-- The check applies to every command in the line, not just the first — each \
-stage of a pipe, and anything after `;`, `&&` or inside `$(...)`, must also be \
-on that list. A permitted command's *arguments* are unrestricted, so \
-`grep git README.md` is fine.
-- Backticks are refused. Use `$(...)` for command substitution.
-- If you need something not on the list, say so and let the operator run it \
-rather than guessing at a workaround.
-- Output is truncated at {MAX_OUTPUT_CHARS} characters. Narrow the command \
-rather than paging through a truncated dump.
-- A command that runs longer than {COMMAND_TIMEOUT_SECONDS} seconds is killed \
-and returns no output at all. Scope expensive searches to a directory rather \
-than starting from `/`.
+    - Output is truncated at {MAX_OUTPUT_CHARS} characters. Narrow the command \
+    rather than paging through a truncated dump.
+    - A command that runs longer than {COMMAND_TIMEOUT_SECONDS} seconds is killed\
+    and returns no output at all. Scope expensive searches to a directory rather \
+    than starting from `/`.
 
-Do not attempt commands outside the permitted list — they fail and cost a turn. \
-If a task genuinely needs one, say so and let the operator run it."""
+    There is no whitelist — any command available in the environment can be
+    executed. If a task genuinely needs something unusual, say so and let the
+    operator run it."""
 
 
 def _conduct() -> str:
@@ -111,6 +127,8 @@ def build_system_prompt(
     *,
     include_environment: bool = True,
     include_shell_policy: bool = True,
+    include_file_reading_policy: bool = True,
+    include_write_file_policy: bool = True,
     extra_instructions: str = "",
 ) -> str:
     """Assemble the system prompt.
@@ -121,6 +139,8 @@ def build_system_prompt(
         include_environment: Emit the host-facts section.
         include_shell_policy: Emit the run_shell_command rules. Set False when
             the agent is created without the shell tool registered.
+        include_file_reading_policy: Emit the read_file tool description.
+        include_write_file_policy: Emit the write_file tool description.
         extra_instructions: Operator text appended last, so it can override
             anything above it.
 
@@ -133,6 +153,10 @@ def build_system_prompt(
         sections.append(_environment())
     if include_shell_policy:
         sections.append(_shell_policy())
+    if include_file_reading_policy:
+        sections.append(_file_reading_policy())
+    if include_write_file_policy:
+        sections.append(_write_file_policy())
 
     sections.append(_conduct())
 
